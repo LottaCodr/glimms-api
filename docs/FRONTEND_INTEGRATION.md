@@ -350,7 +350,113 @@ await api.put('/api/users/me/preferences', {
 
 ## 8. Scans — The Entry Point (Upload → Design Pipeline)
 
-### POST /api/scans/upload — multipart/form-data
+> **Guide note (§3):** The backend now implements **both** the recommended `v1/design-sessions` presigned flow (private S3, no proxy) **and** the legacy `POST /api/scans/upload` FormData proxy for backward compatibility. **New frontend code must use `v1/design-sessions`** — the `FormData` path is deprecated, proxies large bodies through the API process, and will be removed. The dependency graph per guide §3.3 is: `quality + context + detection` in parallel → `attributes` → `permutations + embeddings` → `reasoning` → `mockups`.
+
+### 8A. Recommended: `v1/design-sessions` — presigned direct-to-S3 (per implementation guide §3.1-§3.3)
+
+**Auth:** `requireAuth` + `scanLimiter` (same quotas: free 10/d, premium 100, pro ∞)
+
+#### Step 1 — Create session + upload plan
+
+```http
+POST /v1/design-sessions
+Authorization: Bearer <accessToken>
+Content-Type: application/json
+
+{
+  "vertical": "wardrobe",
+  "occasion": "work",
+  "culture": "south asian",
+  "climate": { "temperature_c": 29, "humidity": 78 },
+  "preferences": { "styles": ["minimalist"], "excluded_labels": ["shorts"], "coverage": "user preference" },
+  "imageCount": 3
+}
+→ 201
+{
+  "session_id": "665a1b...",
+  "status": "created",
+  "upload_urls": [
+    {
+      "image_id": "img_abc123",
+      "object_key": "users/usr_123/sessions/665a1b/images/img_abc123/source.png",
+      "upload_url": "https://glimms-images.s3.amazonaws.com/...?X-Amz-Signature=...&Expires=900",
+      "expires_at": "2026-08-11T14:00:00Z"
+    }
+  ],
+  "correlationId": "cor_..."
+}
+```
+
+* `vertical` must be `wardrobe|room|garden`. Other fields are stored as `inputContext` (user explicit, not inferred — per guide §3.1). Use opaque IDs from backend — never let client choose `object_key`.
+* `imageCount` (1-5) controls how many presigned PUT URLs are issued — frontend must request exact count it intends to upload.
+* `upload_url` is a **short-lived presigned PUT** (900s default, `S3_PRESIGN_EXPIRY_SECONDS`). Client has 15 min to `PUT`.
+
+#### Step 2 — Upload directly to S3 (client → S3, bypassing backend)
+
+```ts
+// After POST /v1/design-sessions
+const { session_id, upload_urls } = await api.post("/v1/design-sessions", {
+  vertical: "wardrobe", occasion: "work", culture: "south asian",
+  climate: { temperature_c: 29, humidity: 78 },
+  preferences: { styles: ["minimalist"] }, imageCount: files.length
+}).then(r=>r.data);
+
+await Promise.all(upload_urls.map(async ({ upload_url, object_key }, i) => {
+  const file = files[i];
+  // Detect real MIME (jpeg|png|webp only — guide §3.2), 15 MB max
+  if (!["image/jpeg","image/png","image/webp"].includes(file.type)) throw new Error("Invalid type");
+  if (file.size > 15*1024*1024) throw new Error("File too large");
+
+  const res = await fetch(upload_url, {
+    method: "PUT",
+    headers: { "Content-Type": file.type }, // must match presigned ContentType
+    body: file, // Blob/File — do NOT JSON-encode
+  });
+  if (!res.ok) throw new Error(`S3 upload failed ${res.status}`);
+}));
+
+```
+
+*Do not* send `Authorization` to S3 — presigned URL already contains signature. Do not send `X-Request-Id`.
+* Frontend **must not call** AI services (`http://localhost:8001`) — only backend does via private DNS (`http://object-detection:8001`, etc. per guide §4).
+
+#### Step 3 — Complete upload & enqueue
+
+```http
+POST /v1/design-sessions/{session_id}/images/complete
+Authorization: Bearer ...
+{ "image_ids": ["img_abc123", "img_def456"] }
+→ 200 { "session_id": "...", "status": "queued", "image_count": 2, "message": "Uploads verified — analysis queued" }
+```
+
+* Backend verifies each `image_id` belongs to session, checks `HeadObject` exists, validates MIME/dimensions server-side, denies `..`/`//` path traversal, enforces `users/<userId>/sessions/<sessionId>/` prefix (§9 security).
+* On success, enqueues `design.analysis.requested` (BullMQ) with `correlationId` and `X-Correlation-ID` headers to AI services.
+* Errors: `400 image_ids not found`, `400 Image not uploaded yet`, `400 Invalid MIME`, `400 Session is queued` (already completed), `429 SCAN_LIMIT_REACHED`.
+
+#### Step 4 — Read progress (§3.4) — polling *or* WebSocket
+
+```http
+GET /v1/design-sessions/{session_id}
+→ 200 {
+  "session_id": "...",
+  "status": "reasoning", // created|uploading|queued|quality_review|detecting|extracting|permuting|embedding|reasoning|composing|completed|failed|cancelled
+  "vertical": "wardrobe",
+  "progress": 75, // 0-100
+  "steps": { "quality":"completed", "detection":"completed", "attributes":"completed", "context":"completed", "permutations":"completed", "embeddings":"completed", "reasoning":"running", "mockups":"pending" },
+  "designs": [], // populated at completed
+  "warnings": [],
+  "artifacts": [],
+  "error": null
+}
+```
+
+Use for polling (`2s` interval) *or* prefer WS `subscribe:session` (next section). Client must handle reconnect — status is persisted, so resume from fetched status.
+
+---
+
+### 8B. Legacy: `POST /api/scans/upload` — multipart/form-data (deprecated — proxies through API)
+
+> Kept for backward compat with `docs/FRONTEND_INTEGRATION.md` v1. It **violates** guide §3.2 ("backend should not proxy large image bodies") and uploads via `multipart/form-data` → backend `sharp` → S3 `PutObject`. Prefer 8A for all new code. It will return `202` immediately after S3 upload, but bypasses presigned verification and is removed in next major.
 
 **Auth:** `requireAuth` + `scanLimiter`  
 **Limits:** `5` images max, `10 MB` each, mime `jpeg|jpg|png|webp` (backend `multer.memoryStorage()`)
@@ -466,12 +572,13 @@ GET /api/designs/jobs/:id
 
 **Polling fallback:** If WebSocket disconnected, `GET /jobs/:id` every 3s until `completed`/`failed`. But prefer WS.
 
-### WebSocket — Socket.IO
+### WebSocket — Socket.IO (jobs + v1 sessions)
 
-* **URL:** same as API (`ws://localhost:4000` dev, `wss://api.glimms.ai` prod). Share HTTP server.
+* **URL:** same as API (`ws://localhost:4000` dev, `wss://api.glimms.ai` prod). Share HTTP server. Frontend must use **relative** `WS_URL` from backend env — never `http://localhost:8001` (guide §4: "frontend code must use relative backend URLs, for example `/v1/design-sessions`, never `http://localhost:8001`").
 * **Transports:** `websocket` + `polling`.
 * **Auth:** `handshake.auth.token` (mobile) **or** `Authorization: Bearer` header. Backend verifies `jwt.verify(token, JWT_SECRET)`. On failure → `connect_error` `Authentication token required` / `Invalid or expired token`.
-* **Rooms:** `job:${jobId}` — one room per job, user must **own** job (backend checks `DesignJob.userId === socket.data.user.sub`, returns `error {message:"Not authorized for this job"}` if not).
+* **Rooms (legacy jobs):** `job:${jobId}` — one room per job, user must **own** job (backend checks `DesignJob.userId === socket.data.user.sub`, returns `error {message:"Not authorized for this job"}` if not).
+* **Rooms (v1 sessions — preferred per guide §3.4):** `session:${sessionId}` (also aliased `job:${sessionId}` for compat). Subscribe via `subscribe:session` or `subscribe:design-session`. Backend checks `DesignSession.userId`. Progress payloads are identical but also emit `session:update` with `{ session_id, status, progress, steps, warnings }` for the new status model.
 
 #### Frontend implementation (React / Expo)
 
@@ -895,6 +1002,18 @@ export type JobProgress = {
   progress:number; itemCount?:number;
 };
 export type JobComplete = { designs:any[], vertical:Vertical, itemCount:number, designCount:number, generatedAt:string };
+
+// v1 design-sessions (guide §3.4)
+export type SessionStatus = "created"|"uploading"|"queued"|"quality_review"|"detecting"|"extracting"|"permuting"|"embedding"|"reasoning"|"composing"|"completed"|"failed"|"cancelled";
+export type StepStatus = "pending"|"running"|"completed"|"failed"|"skipped";
+export type DesignSession = {
+  session_id:string; status:SessionStatus; vertical:Vertical; progress:number;
+  steps: Record<"quality"|"detection"|"attributes"|"context"|"permutations"|"embeddings"|"reasoning"|"mockups", StepStatus>;
+  designs: any[]; warnings:string[]; artifacts:{id:string, permutationId:string, objectKey:string, contentType:string, url?:string}[];
+  error: { code:string, message:string, details?:unknown, request_id?:string }|null;
+  correlationId:string; createdAt:string; updatedAt:string;
+};
+export type UploadUrl = { image_id:string, object_key:string, upload_url:string, expires_at:string };
 ```
 
 ---
@@ -1149,8 +1268,14 @@ DELETE /api/users/me                 @requireAuth → { message }
 GET    /api/users/me/preferences     @requireAuth → Preferences|{}
 PUT    /api/users/me/preferences     @requireAuth { occupation?, styleGoals?[], occasions?[], culturalCtx?, location?{lat,lon,city?,country?} }
 
-# Scans (entry point)
-POST   /api/scans/upload             @requireAuth + scanLimiter  multipart(images[1..5], vertical, occasion?, occupation?, culturalCtx?, lat?, lon?) → 202 { jobId, status, estimatedSeconds, qualityWarning? }
+# v1 Design Sessions (recommended — per implementation guide §3, replaces Scans for new clients)
+POST   /v1/design-sessions           @requireAuth + scanLimiter { vertical, occasion?, culture?, climate?{temperature_c,humidity}, preferences?{styles,excluded_labels,coverage}, imageCount?1-5 } → 201 { session_id, status, upload_urls:[{image_id,object_key,upload_url,expires_at}], correlationId }
+POST   /v1/design-sessions/:id/images/complete @requireAuth { image_ids:[...] } → 200 { session_id, status:"queued", image_count, message }
+GET    /v1/design-sessions/:id       @requireAuth → { session_id, status, vertical, progress, steps:{quality,detection,attributes,context,permutations,embeddings,reasoning,mockups}, designs, warnings, artifacts, error, correlationId }
+GET    /v1/design-sessions           @requireAuth ?page&limit → { sessions, total, page, limit, totalPages }
+DELETE /v1/design-sessions/:id       @requireAuth → { session_id, status:"cancelled" }
+# Scans (entry point — legacy deprecated, proxies via API; prefer v1 above)
+POST   /api/scans/upload             @requireAuth + scanLimiter  multipart(images[1..5], vertical, occasion?, occupation?, culturalCtx?, lat?, lon?) → 202 { jobId, status, estimatedSeconds, qualityWarning? } (deprecated)
 
 # Catalog
 GET    /api/catalog                  @requireAuth ?vertical&category&tag&page&limit&includeUrls → { items, total, page, limit, totalPages }
@@ -1184,10 +1309,12 @@ GET    /api/analytics/me             @requireAuth → { scansToday, catalogCount
 # Health
 GET    /health                       → { status:"ok"|"degraded", checks:{mongodb,redis}, uptime, ts }
 
-# WebSocket
+# WebSocket (Socket.IO) — subscribe to legacy jobs *or* v1 sessions (guide §3.4 recommends WS or polling)
 WS     /  (Socket.IO) auth: { token } or header Bearer
-  → emit subscribe:job(jobId) → on subscribed, job:update, job:complete, job:failed, error
+  → emit subscribe:job(jobId) → on subscribed, job:update, job:complete, job:failed, error  (legacy)
   → emit unsubscribe:job(jobId)
+  → emit subscribe:session(sessionId) | subscribe:design-session(sessionId) → on subscribed, session:update, job:update, job:complete, job:failed (v1 preferred)
+  → emit unsubscribe:session(sessionId)
 ```
 
 **Auth header:** `Authorization: Bearer <accessToken>`  
@@ -1203,7 +1330,8 @@ WS     /  (Socket.IO) auth: { token } or header Bearer
 - [ ] Secure storage for tokens (`SecureStore` / `httpOnly`).
 - [ ] Build Splash → `GET /users/me` with refresh fallback.
 - [ ] Onboarding → `PUT /preferences` with location permission.
-- [ ] Scan picker → `FormData` `POST /scans/upload` → handle `202`/`429`/`qualityWarning`.
+- [ ] **v1 Sessions (preferred):** `POST /v1/design-sessions {vertical,occasion,culture,climate,preferences,imageCount}` → `PUT` each `upload_url` directly to S3 (no auth header) → `POST /v1/design-sessions/:id/images/complete {image_ids}` → handle `400` validation & `429 SCAN_LIMIT_REACHED`.
+- [ ] Legacy fallback (deprecated): Scan picker → `FormData` `POST /api/scans/upload` → handle `202`/`429`/`qualityWarning` (will be removed — migrate to v1).
 - [ ] Job progress → Socket.IO `subscribe:job` + `job:*` listeners + fallback poll, push notification deep link.
 - [ ] Catalog list with infinite scroll `includeUrls=true`, detail + edit/delete.
 - [ ] Saved designs list + favorite + delete.

@@ -25,6 +25,10 @@ export interface DesignJobData {
   imageKeys:   string[];
   contextData: Record<string, unknown>;
   tier:        'free' | 'premium' | 'pro';
+  // v1 design-sessions (per implementation guide)
+  sessionId?: string;
+  correlationId?: string;
+  pipelineVersion?: string;
 }
 
 export interface NotificationJobData {
@@ -39,7 +43,7 @@ export interface NotificationJobData {
 export async function enqueueDesignJob(data: DesignJobData) {
   const priority = data.tier === 'pro' ? 1 : data.tier === 'premium' ? 5 : 10;
   const job = await designQueue.add('run', data, { priority });
-  logger.info({ jobId: data.jobId, priority }, 'Design job enqueued');
+  logger.info({ jobId: data.jobId ?? (data as any).sessionId, priority, correlationId: (data as any).correlationId }, 'Design job enqueued');
   return job;
 }
 
