@@ -3,7 +3,8 @@ import { redis } from './redis';
 import { logger } from './logger';
 
 export const designQueue = new Queue('glimms:design-pipeline', {
-  connection: redis,
+  // BullMQ ships its own ioredis copy — cast to avoid duplicate-type conflicts
+  connection: redis as any,
   defaultJobOptions: {
     attempts: 3,
     backoff: { type: 'exponential', delay: 3000 },
@@ -13,7 +14,7 @@ export const designQueue = new Queue('glimms:design-pipeline', {
 });
 
 export const notificationQueue = new Queue('glimms:notifications', {
-  connection: redis,
+  connection: redis as any,
   defaultJobOptions: { attempts: 3, backoff: { type: 'fixed', delay: 2000 } },
 });
 

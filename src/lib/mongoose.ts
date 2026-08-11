@@ -8,9 +8,10 @@ import { logger } from './logger';
  * Key Mongoose 9 notes:
  *  - strictQuery defaults to false (no need to set it manually)
  *  - No more useNewUrlParser / useUnifiedTopology options (removed)
- *  - Connection events are emitted on mongoose.connection
- *  - mongoose.connect() returns a Promise<Mongoose>
+ *  - sanitizeFilter guards against NoSQL injection ($where, $nor etc) — GHSA-wpg9-53fq-2r8h
  */
+
+mongoose.set('sanitizeFilter', true);
 
 mongoose.connection.on('connected', () => {
   logger.info('MongoDB connected');
@@ -37,7 +38,18 @@ export async function connectDB(): Promise<void> {
     socketTimeoutMS: 45000,
     // Retry writes on transient failures (replica sets / Atlas)
     retryWrites: true,
+    // Auto-create indexes in development (disable in production for performance)
+    autoIndex: config.isDev,
   });
+  // Ensure indexes are built in prod as well (explicit sync)
+  if (!config.isDev) {
+    try {
+      await mongoose.connection.syncIndexes();
+      logger.info('MongoDB indexes synced');
+    } catch (e) {
+      logger.warn({ err: e }, 'Index sync failed (non-fatal)');
+    }
+  }
 }
 
 export async function disconnectDB(): Promise<void> {

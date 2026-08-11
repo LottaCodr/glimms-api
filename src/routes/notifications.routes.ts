@@ -17,4 +17,12 @@ router.post('/device-token', requireAuth, validateBody(registerTokenSchema), asy
   res.status(201).json(result);
 });
 
+/** DELETE /api/notifications/device-token — remove token (logout device) */
+router.delete('/device-token', requireAuth, validateBody(registerTokenSchema), async (req: AuthRequest, res) => {
+  const { DeviceToken } = await import('../models');
+  await DeviceToken.deleteOne({ token: req.body.token, userId: req.user!.sub });
+  res.json({ message: 'Device token removed' });
+});
+
 export default router;
+export { router as notificationsRouter };

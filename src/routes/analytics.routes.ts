@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { analyticsService } from '../services/analytics.service';
-import { optionalAuth, AuthRequest } from '../middleware/auth.middleware';
+import { optionalAuth, requireAuth, AuthRequest } from '../middleware/auth.middleware';
 import { validateBody } from '../middleware/validate.middleware';
 
 const router = Router();
@@ -11,7 +11,7 @@ const trackSchema = z.object({
   properties: z.record(z.unknown()).optional(),
 });
 
-/** POST /api/analytics/track */
+/** POST /api/analytics/track — optional auth (anonymous allowed) */
 router.post('/track', optionalAuth, validateBody(trackSchema), async (req: AuthRequest, res) => {
   const result = await analyticsService.track(
     req.user?.sub ?? 'anonymous',
@@ -21,10 +21,11 @@ router.post('/track', optionalAuth, validateBody(trackSchema), async (req: AuthR
   res.json(result);
 });
 
-/** GET /api/analytics/me */
-router.get('/me', optionalAuth, async (req: AuthRequest, res) => {
-  const stats = await analyticsService.getBasicStats(req.user?.sub ?? 'anonymous');
+/** GET /api/analytics/me — requires auth, returns per-user stats */
+router.get('/me', requireAuth, async (req: AuthRequest, res) => {
+  const stats = await analyticsService.getBasicStats(req.user!.sub);
   res.json(stats);
 });
 
 export default router;
+export { router as analyticsRouter };

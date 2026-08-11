@@ -4,9 +4,11 @@ import helmet from 'helmet';
 import cors from 'cors';
 import compression from 'compression';
 import pinoHttp from 'pino-http';
+import mongoose from 'mongoose';
 
 import { config } from './config';
 import { logger } from './lib/logger';
+import { redis } from './lib/redis';
 import { generalLimiter } from './middleware/rateLimiter.middleware';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.middleware';
 
@@ -16,11 +18,9 @@ import usersRoutes         from './routes/users.routes';
 import catalogRoutes       from './routes/catalog.routes';
 import scansRoutes         from './routes/scans.routes';
 import { designsRouter }   from './routes/designs.routes';
-import {
-  subscriptionsRouter,
-  notificationsRouter,
-  analyticsRouter,
-} from './routes/misc.routes';
+import subscriptionsRouter from './routes/subscriptions.routes';
+import notificationsRouter from './routes/notifications.routes';
+import analyticsRouter     from './routes/analytics.routes';
 
 export function createApp(): Express {
   const app = express();
@@ -80,13 +80,32 @@ export function createApp(): Express {
   app.use(express.json({ limit: '2mb' }));
   app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
-  // ── Health check ──────────────────────────────────────────────────────────
-  app.get('/health', (_req, res) => {
-    res.json({
-      status:  'ok',
+  // ── Health check (liveness + dependency readiness) ───────────────────────
+  app.get('/health', async (_req, res) => {
+    const checks: Record<string, string> = {};
+    // Mongo
+    try {
+      const state = mongoose.connection.readyState; // 0=disconnected,1=connected,2=connecting,3=disconnecting
+      checks.mongodb = state === 1 ? 'ok' : `state:${state}`;
+    } catch {
+      checks.mongodb = 'error';
+    }
+    // Redis (best-effort)
+    try {
+      const pong = await redis.ping();
+      checks.redis = pong === 'PONG' ? 'ok' : pong;
+    } catch {
+      checks.redis = 'unavailable';
+    }
+
+    const healthy = checks.mongodb === 'ok';
+    res.status(healthy ? 200 : 503).json({
+      status:  healthy ? 'ok' : 'degraded',
       service: 'glimms-api',
       env:     config.nodeEnv,
+      checks,
       ts:      new Date().toISOString(),
+      uptime:  process.uptime(),
     });
   });
 

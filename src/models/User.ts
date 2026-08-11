@@ -60,10 +60,20 @@ const UserSchema = new Schema<IUserDocument>(
     versionKey: false,  // removes __v field
     toJSON: {
       virtuals: true,
-      transform: (_doc, ret) => {
+      transform: (_doc: any, ret: any) => {
         ret.id = ret._id;
         delete ret._id;
         delete ret.passwordHash;   // never leak password hash in JSON
+        // Mongoose adds __v even when versionKey false in some edge cases
+        delete ret.__v;
+        return ret;
+      },
+    },
+    toObject: {
+      virtuals: true,
+      transform: (_doc: any, ret: any) => {
+        ret.id = ret._id;
+        delete ret._id;
         return ret;
       },
     },

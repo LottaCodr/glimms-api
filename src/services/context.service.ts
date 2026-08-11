@@ -11,9 +11,14 @@ export const contextService = {
     opts: { occasion?: string; occupation?: string; culturalCtx?: string } = {},
   ) {
     // Cache key rounded to ~11km grid — good enough for climate/culture
-    const cacheKey = `ctx:${lat.toFixed(1)}:${lon.toFixed(1)}:${opts.occasion ?? ''}:${opts.occupation ?? ''}`;
-    const cached   = await redis.get(cacheKey);
-    if (cached) return JSON.parse(cached);
+    // Include all context dimensions to avoid collisions
+    const cacheKey = `ctx:${lat.toFixed(1)}:${lon.toFixed(1)}:${opts.occasion ?? ''}:${opts.occupation ?? ''}:${opts.culturalCtx ?? ''}`;
+    try {
+      const cached = await redis.get(cacheKey);
+      if (cached) return JSON.parse(cached);
+    } catch {
+      // Redis unavailable — proceed without cache
+    }
 
     // 1. Weather
     let climateData: Record<string, unknown> = { temp: 22, condition: 'clear', description: 'Mild' };
@@ -66,7 +71,11 @@ export const contextService = {
       generatedAt: new Date().toISOString(),
     };
 
-    await redis.setex(cacheKey, 3600, JSON.stringify(context));
+    try {
+      await redis.setex(cacheKey, 3600, JSON.stringify(context));
+    } catch {
+      // non-fatal
+    }
     return context;
   },
 };

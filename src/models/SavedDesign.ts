@@ -32,7 +32,7 @@ const SavedDesignSchema = new Schema<ISavedDesignDocument>(
       required: true,
     },
     title:       { type: String, default: null, trim: true },
-    items:       { type: [Schema.Types.Mixed], default: [] },
+    items:       { type: Schema.Types.Mixed, default: [] } as any,
     mockupUrl:   { type: String, default: null },
     explanation: { type: String, default: null },
     tips:        { type: [String], default: [] },
@@ -45,7 +45,11 @@ const SavedDesignSchema = new Schema<ISavedDesignDocument>(
     versionKey: false,
     toJSON: {
       virtuals: true,
-      transform: (_doc, ret) => { ret.id = ret._id; delete ret._id; return ret; },
+      transform: (_doc: any, ret: any) => { ret.id = ret._id; delete ret._id; delete ret.__v; return ret; },
+    },
+    toObject: {
+      virtuals: true,
+      transform: (_doc: any, ret: any) => { ret.id = ret._id; delete ret._id; return ret; },
     },
   }
 );

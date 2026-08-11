@@ -47,25 +47,36 @@ describe('catalogService.list', () => {
   });
 
   it('returns only the requesting user\'s items', async () => {
-    const items = await catalogService.list(MOCK_USER_ID, {});
+    const res: any = await catalogService.list(MOCK_USER_ID, {});
+    const items = Array.isArray(res) ? res : res.items;
     expect(items.length).toBe(2);
-    items.forEach(i => expect(i.userId.toString()).toBe(MOCK_USER_ID));
+    items.forEach((i: any) => expect(i.userId.toString()).toBe(MOCK_USER_ID));
   });
 
   it('filters by vertical', async () => {
-    const items = await catalogService.list(MOCK_USER_ID, { vertical: 'room' });
+    const res: any = await catalogService.list(MOCK_USER_ID, { vertical: 'room' });
+    const items = Array.isArray(res) ? res : res.items;
     expect(items.length).toBe(1);
     expect(items[0].label).toBe('sofa');
   });
 
   it('filters by tag', async () => {
-    const items = await catalogService.list(MOCK_USER_ID, { tag: 'cotton' });
+    const res: any = await catalogService.list(MOCK_USER_ID, { tag: 'cotton' });
+    const items = Array.isArray(res) ? res : res.items;
     expect(items.length).toBe(1);
   });
 
   it('returns empty array for unknown vertical', async () => {
-    const items = await catalogService.list(MOCK_USER_ID, { vertical: 'garden' });
+    const res: any = await catalogService.list(MOCK_USER_ID, { vertical: 'garden' });
+    const items = Array.isArray(res) ? res : res.items;
     expect(items).toEqual([]);
+  });
+
+  it('supports pagination', async () => {
+    const res: any = await catalogService.list(MOCK_USER_ID, {}, { page: 1, limit: 1 });
+    expect(res.items.length).toBe(1);
+    expect(res.total).toBe(2);
+    expect(res.totalPages).toBe(2);
   });
 });
 
@@ -107,7 +118,8 @@ describe('catalogService.remove', () => {
     const created = await catalogService.create(MOCK_USER_ID, MOCK_ITEM);
     await catalogService.remove(created._id.toString(), MOCK_USER_ID);
 
-    const items = await catalogService.list(MOCK_USER_ID, {});
+    const res: any = await catalogService.list(MOCK_USER_ID, {});
+    const items = Array.isArray(res) ? res : res.items;
     expect(items.length).toBe(0);
   });
 });
