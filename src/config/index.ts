@@ -51,6 +51,9 @@ const schema = z.object({
   RATE_LIMIT_MAX_REQUESTS:  z.string().default('100'),
 
   OPENWEATHER_API_KEY:    z.string().optional(),
+
+  // Internal service-to-service auth (added per backend implementation guide §4)
+  AI_INTERNAL_TOKEN:       z.string().optional(),
 });
 
 const parsed = schema.safeParse(process.env);
@@ -124,4 +127,5 @@ export const config = {
   cors:      { allowedOrigins: e.ALLOWED_ORIGINS.split(',').map(o => o.trim()) },
   rateLimit: { windowMs: parseInt(e.RATE_LIMIT_WINDOW_MS), max: parseInt(e.RATE_LIMIT_MAX_REQUESTS) },
   openweather: { apiKey: e.OPENWEATHER_API_KEY },
+  aiInternalToken: e.AI_INTERNAL_TOKEN,
 } as const;

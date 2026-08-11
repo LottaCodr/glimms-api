@@ -8,6 +8,21 @@ import { ConflictError, UnauthorizedError } from '../middleware/errorHandler.mid
 export interface RegisterInput { email: string; password: string; name?: string }
 export interface LoginInput    { email: string; password: string }
 
+// Parse expiresIn like "15m", "7d" to seconds for response; fallback 900
+function parseExpiresInToSeconds(exp: string): number {
+  const m = exp.match(/^(\d+)([smhd])$/);
+  if (!m) return 900;
+  const n = parseInt(m[1], 10);
+  const unit = m[2];
+  const mult: Record<string, number> = { s: 1, m: 60, h: 3600, d: 86400 };
+  return n * (mult[unit] ?? 1);
+}
+
+function parseRefreshExpiresMs(exp: string): number {
+  const secs = parseExpiresInToSeconds(exp);
+  return secs * 1000;
+}
+
 // ── Token pair generator ──────────────────────────────────────────────────────
 
 async function issueTokenPair(userId: string, email: string, tier: string) {
@@ -15,17 +30,17 @@ async function issueTokenPair(userId: string, email: string, tier: string) {
   const accessToken = jwt.sign(
     { sub: userId, email, tier },
     config.jwt.secret,
-    { expiresIn: config.jwt.expiresIn },
+    { expiresIn: config.jwt.expiresIn as any },
   );
 
   // Refresh token (long-lived, stored as hash in MongoDB)
   const rawRefresh  = crypto.randomBytes(48).toString('hex');
   const tokenHash   = crypto.createHash('sha256').update(rawRefresh).digest('hex');
-  const expiresAt   = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+  const expiresAt   = new Date(Date.now() + parseRefreshExpiresMs(config.jwt.refreshExpiresIn));
 
   await RefreshToken.create({ userId, tokenHash, expiresAt });
 
-  return { accessToken, refreshToken: rawRefresh, expiresIn: 900 };
+  return { accessToken, refreshToken: rawRefresh, expiresIn: parseExpiresInToSeconds(config.jwt.expiresIn) };
 }
 
 // ── Public service methods ────────────────────────────────────────────────────
@@ -38,6 +53,18 @@ export const authService = {
 
     const passwordHash = await bcrypt.hash(password, config.bcryptRounds);
     const user = await User.create({ email: email.toLowerCase(), passwordHash, name });
+
+    // Welcome email (fire-and-forget, never block registration)
+    try {
+      const { notificationsService } = await import('./notifications.service');
+      notificationsService.sendEmail(
+        user.email,
+        'Welcome to Glimms ✨',
+        `<p>Hi ${user.name ?? 'there'},</p><p>Welcome to Glimms — your AI style companion. Start by scanning your wardrobe!</p>`
+      ).catch(() => { /* ignore email failures */ });
+    } catch (_e) {
+      // ignore — email is non-critical
+    }
 
     return issueTokenPair(user._id.toString(), user.email, user.tier);
   },

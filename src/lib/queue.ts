@@ -3,7 +3,8 @@ import { redis } from './redis';
 import { logger } from './logger';
 
 export const designQueue = new Queue('glimms:design-pipeline', {
-  connection: redis,
+  // BullMQ ships its own ioredis copy — cast to avoid duplicate-type conflicts
+  connection: redis as any,
   defaultJobOptions: {
     attempts: 3,
     backoff: { type: 'exponential', delay: 3000 },
@@ -13,7 +14,7 @@ export const designQueue = new Queue('glimms:design-pipeline', {
 });
 
 export const notificationQueue = new Queue('glimms:notifications', {
-  connection: redis,
+  connection: redis as any,
   defaultJobOptions: { attempts: 3, backoff: { type: 'fixed', delay: 2000 } },
 });
 
@@ -24,6 +25,10 @@ export interface DesignJobData {
   imageKeys:   string[];
   contextData: Record<string, unknown>;
   tier:        'free' | 'premium' | 'pro';
+  // v1 design-sessions (per implementation guide)
+  sessionId?: string;
+  correlationId?: string;
+  pipelineVersion?: string;
 }
 
 export interface NotificationJobData {
@@ -38,7 +43,7 @@ export interface NotificationJobData {
 export async function enqueueDesignJob(data: DesignJobData) {
   const priority = data.tier === 'pro' ? 1 : data.tier === 'premium' ? 5 : 10;
   const job = await designQueue.add('run', data, { priority });
-  logger.info({ jobId: data.jobId, priority }, 'Design job enqueued');
+  logger.info({ jobId: data.jobId ?? (data as any).sessionId, priority, correlationId: (data as any).correlationId }, 'Design job enqueued');
   return job;
 }
 

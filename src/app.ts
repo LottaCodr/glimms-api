@@ -4,23 +4,25 @@ import helmet from 'helmet';
 import cors from 'cors';
 import compression from 'compression';
 import pinoHttp from 'pino-http';
+import mongoose from 'mongoose';
 
 import { config } from './config';
 import { logger } from './lib/logger';
+import { redis } from './lib/redis';
 import { generalLimiter } from './middleware/rateLimiter.middleware';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.middleware';
 
-// Routes
+// Routes — legacy API (kept for backward compatibility)
 import authRoutes          from './routes/auth.routes';
 import usersRoutes         from './routes/users.routes';
 import catalogRoutes       from './routes/catalog.routes';
 import scansRoutes         from './routes/scans.routes';
 import { designsRouter }   from './routes/designs.routes';
-import {
-  subscriptionsRouter,
-  notificationsRouter,
-  analyticsRouter,
-} from './routes/misc.routes';
+import subscriptionsRouter from './routes/subscriptions.routes';
+import notificationsRouter from './routes/notifications.routes';
+import analyticsRouter     from './routes/analytics.routes';
+// Routes — v1 design-sessions (per backend implementation guide §3)
+import designSessionsRouter from './routes/designSessions.routes';
 
 export function createApp(): Express {
   const app = express();
@@ -45,30 +47,36 @@ export function createApp(): Express {
     },
     credentials:     true,
     methods:         ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders:  ['Authorization', 'Content-Type', 'X-Requested-With'],
+    allowedHeaders:  ['Authorization', 'Content-Type', 'X-Requested-With', 'X-Correlation-ID', 'X-Request-ID'],
+    exposedHeaders:  ['X-Request-Id'],
   }));
 
   // ── Response compression ──────────────────────────────────────────────────
   app.use(compression());
 
   // ── HTTP request logger ───────────────────────────────────────────────────
-  app.use(pinoHttp({
+  app.use((pinoHttp as any)({
     logger,
-    customLogLevel: (_req, res) =>
+    customLogLevel: (_req: any, res: any) =>
       res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : 'info',
-    redact: ['req.headers.authorization'],
+    redact: ['req.headers.authorization', 'req.headers["x-correlation-id"]'],
     serializers: {
-      req: req => ({
+      req: (req: any) => ({
         id:     req.id,
         method: req.method,
         url:    req.url,
         ip:     req.remoteAddress,
       }),
     },
+    genReqId: (req: any) => (req.headers['x-request-id'] as string) || (req.headers['x-correlation-id'] as string) || undefined as any,
   }));
 
   // ── Global rate limiter ───────────────────────────────────────────────────
-  app.use(generalLimiter);
+  // Skip health so k8s probes are not rate-limited
+  app.use((req, res, next) => {
+    if (req.path === '/health') return next();
+    return generalLimiter(req, res, next);
+  });
 
   // ── Raw body for Stripe webhook — MUST come BEFORE express.json() ─────────
   app.use(
@@ -80,17 +88,72 @@ export function createApp(): Express {
   app.use(express.json({ limit: '2mb' }));
   app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
-  // ── Health check ──────────────────────────────────────────────────────────
-  app.get('/health', (_req, res) => {
-    res.json({
-      status:  'ok',
+  // ── Health check (liveness + dependency readiness) ───────────────────────
+  app.get('/health', async (_req, res) => {
+    const checks: Record<string, string> = {};
+    const services: Record<string, any> = {};
+    // Mongo
+    try {
+      const state = mongoose.connection.readyState; // 0=disconnected,1=connected,2=connecting,3=disconnecting
+      checks.mongodb = state === 1 ? 'ok' : `state:${state}`;
+    } catch {
+      checks.mongodb = 'error';
+    }
+    // Redis (best-effort)
+    try {
+      const pong = await redis.ping();
+      checks.redis = pong === 'PONG' ? 'ok' : pong;
+    } catch {
+      checks.redis = 'unavailable';
+    }
+    // AI services readiness (optional — check only if not in test)
+    if ((config.nodeEnv as string) !== 'test') {
+      // We expose readiness via separate endpoint /health/ready if needed; keep /health lightweight
+      services.ai = 'use GET /health/ready for AI service readiness';
+    }
+
+    const healthy = checks.mongodb === 'ok';
+    res.status(healthy ? 200 : 503).json({
+      status:  healthy ? 'ok' : 'degraded',
       service: 'glimms-api',
       env:     config.nodeEnv,
+      checks,
+      services,
       ts:      new Date().toISOString(),
+      uptime:  process.uptime(),
     });
   });
 
-  // ── API routes ────────────────────────────────────────────────────────────
+  // AI services readiness (per guide §4: liveness vs readiness, model_loaded)
+  app.get('/health/ready', async (_req, res) => {
+    const aiChecks: Record<string, any> = {};
+    const urls: Record<string,string> = {
+      'object-detection': config.ai.objectDetection,
+      'attribute-extractor': config.ai.attributeExtractor,
+      'embedding-engine': config.ai.embeddingEngine,
+      'permutation-engine': config.ai.permutationEngine,
+      'llm-reasoning': config.ai.llmReasoning,
+      'mockup-compositor': config.ai.mockupCompositor,
+      'quality-guard': config.ai.qualityGuard,
+      'context-inference': config.ai.contextInference,
+    };
+    const axios = (await import('axios')).default;
+    await Promise.all(Object.entries(urls).map(async ([name, url]) => {
+      try {
+        const r = await axios.get(`${url}/health`, { timeout: 2000 });
+        const data = r.data as any;
+        // Guide: detector with model_loaded:false is dev-only; Pinecone memory backend not prod
+        const isProdReady = config.isDev ? true : (data.model_loaded !== false && data.backend !== 'memory');
+        aiChecks[name] = { status: isProdReady ? 'ok' : 'degraded', detail: data };
+      } catch (e:any) {
+        aiChecks[name] = { status: 'unavailable', error: e.message };
+      }
+    }));
+    const allOk = Object.values(aiChecks).every((c:any)=>c.status==='ok');
+    res.status(allOk ? 200 : 503).json({ status: allOk ? 'ok' : 'degraded', checks: aiChecks, ts: new Date().toISOString() });
+  });
+
+  // ── API routes — legacy (deprecated but kept) ─────────────────────────────
   app.use('/api/auth',          authRoutes);
   app.use('/api/users',         usersRoutes);
   app.use('/api/catalog',       catalogRoutes);
@@ -99,6 +162,11 @@ export function createApp(): Express {
   app.use('/api/subscriptions', subscriptionsRouter);
   app.use('/api/notifications', notificationsRouter);
   app.use('/api/analytics',     analyticsRouter);
+
+  // ── v1 API — per backend implementation guide (preferred) ─────────────────
+  app.use('/v1/design-sessions', designSessionsRouter);
+  // Also expose health under v1
+  app.get('/v1/health', (_req, res) => res.redirect(307, '/health'));
 
   // ── 404 + global error handler (must be last) ─────────────────────────────
   app.use(notFoundHandler);

@@ -16,6 +16,7 @@ const createItemSchema = z.object({
     mood:     z.string().optional(),
   }).passthrough(),
   imageKey:    z.string().min(1),
+  thumbnailKey: z.string().optional(),
   confidence:  z.number().min(0).max(1),
   texture:     z.string().optional(),
   pattern:     z.string().optional(),
@@ -27,6 +28,7 @@ const createItemSchema = z.object({
 const updateItemSchema = z.object({
   label:      z.string().optional(),
   tags:       z.array(z.string()).optional(),
+  styleTags:  z.array(z.string()).optional(),
   attributes: z.record(z.unknown()).optional(),
 });
 
@@ -34,18 +36,29 @@ const listQuerySchema = z.object({
   vertical: z.enum(['wardrobe', 'room', 'garden']).optional(),
   category: z.string().optional(),
   tag:      z.string().optional(),
+  page:     z.coerce.number().int().min(1).default(1),
+  limit:    z.coerce.number().int().min(1).max(100).default(20),
+  includeUrls: z.coerce.boolean().optional(),
 });
 
-// GET /api/catalog
+// GET /api/catalog — supports pagination & optional presigned URLs
 router.get('/', requireAuth, validateQuery(listQuerySchema), async (req: AuthRequest, res) => {
-  const items = await catalogService.list(req.user!.sub, (req as any).validatedQuery);
-  res.json(items);
+  const q = (req as any).validatedQuery;
+  const { page, limit, includeUrls, ...filters } = q;
+  const result = await catalogService.list(req.user!.sub, filters, { page, limit, includeUrls });
+  res.json(result);
 });
 
 // GET /api/catalog/:id
 router.get('/:id', requireAuth, async (req: AuthRequest, res) => {
   const item = await catalogService.findOne(req.params.id, req.user!.sub);
   res.json(item);
+});
+
+// GET /api/catalog/:id/url — presigned S3 URL for single item
+router.get('/:id/url', requireAuth, async (req: AuthRequest, res) => {
+  const url = await catalogService.getPresignedUrl(req.params.id, req.user!.sub);
+  res.json({ url });
 });
 
 // POST /api/catalog

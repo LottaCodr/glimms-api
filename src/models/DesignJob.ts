@@ -47,7 +47,11 @@ const DesignJobSchema = new Schema<IDesignJobDocument>(
     versionKey: false,
     toJSON: {
       virtuals: true,
-      transform: (_doc, ret) => { ret.id = ret._id; delete ret._id; return ret; },
+      transform: (_doc: any, ret: any) => { ret.id = ret._id; delete ret._id; delete ret.__v; return ret; },
+    },
+    toObject: {
+      virtuals: true,
+      transform: (_doc: any, ret: any) => { ret.id = ret._id; delete ret._id; return ret; },
     },
   }
 );

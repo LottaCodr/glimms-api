@@ -1,6 +1,6 @@
 import { Types } from 'mongoose';
 import { DesignJob, SavedDesign } from '../models';
-import { enqueueDesignJob, DesignJobData } from '../lib/queue';
+import { enqueueDesignJob } from '../lib/queue';
 import { NotFoundError, ForbiddenError } from '../middleware/errorHandler.middleware';
 import { logger } from '../lib/logger';
 
@@ -50,13 +50,14 @@ export const designsService = {
     return job;
   },
 
-  async listJobs(userId: string, limit = 20) {
-    return DesignJob
-      .find({ userId })
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .select('vertical status createdAt completedAt')
-      .lean();
+  async listJobs(userId: string, opts: { page: number; limit: number } = { page: 1, limit: 20 }) {
+    const { page, limit } = opts;
+    const skip = (page - 1) * limit;
+    const [jobs, total] = await Promise.all([
+      DesignJob.find({ userId } as any).sort({ createdAt: -1 }).skip(skip).limit(limit).select('vertical status createdAt completedAt').lean(),
+      DesignJob.countDocuments({ userId } as any),
+    ]);
+    return { jobs, total, page, limit, totalPages: Math.ceil(total / limit) };
   },
 
   async updateJobStatus(
@@ -73,11 +74,16 @@ export const designsService = {
     return DesignJob.findByIdAndUpdate(jobId, { $set: update }, { new: true });
   },
 
-  async getSavedDesigns(userId: string) {
-    return SavedDesign
-      .find({ userId })
-      .sort({ createdAt: -1 })
-      .lean();
+  async getSavedDesigns(userId: string, opts: { page: number; limit: number; favorite?: boolean } = { page: 1, limit: 20 }) {
+    const { page, limit, favorite } = opts;
+    const query: any = { userId };
+    if (favorite !== undefined) query.isFavorite = favorite;
+    const skip = (page - 1) * limit;
+    const [designs, total] = await Promise.all([
+      SavedDesign.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      SavedDesign.countDocuments(query),
+    ]);
+    return { designs, total, page, limit, totalPages: Math.ceil(total / limit) };
   },
 
   async saveDesign(userId: string, jobId: string, data: {
@@ -88,7 +94,20 @@ export const designsService = {
     tips?:        string[];
     score?:       number;
   }) {
-    return SavedDesign.create({ userId, jobId, ...data });
+    if (!Types.ObjectId.isValid(jobId)) throw new NotFoundError('Design job');
+    const job = await DesignJob.findById(jobId);
+    if (!job) throw new NotFoundError('Design job');
+    if (job.userId.toString() !== userId) throw new ForbiddenError('You do not own this job');
+    return SavedDesign.create({ userId, jobId, ...data } as any);
+  },
+
+  async deleteSavedDesign(id: string, userId: string) {
+    if (!Types.ObjectId.isValid(id)) throw new NotFoundError('Saved design');
+    const design = await SavedDesign.findById(id);
+    if (!design) throw new NotFoundError('Saved design');
+    if (design.userId.toString() !== userId) throw new ForbiddenError();
+    await SavedDesign.deleteOne({ _id: id });
+    return { message: 'Saved design deleted' };
   },
 
   async toggleFavorite(id: string, userId: string) {

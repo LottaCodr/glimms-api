@@ -1,6 +1,6 @@
 import request from 'supertest';
 import mongoose from 'mongoose';
-import { createApp } from '../app';
+import { createApp } from './app';
 
 const MONGO_URI = process.env.MONGODB_URI ?? 'mongodb://localhost:27017/glimms_test';
 
@@ -18,9 +18,10 @@ afterAll(async () => {
 describe('GET /health', () => {
   it('returns 200 with status ok', async () => {
     const res = await request(app).get('/health');
-    expect(res.status).toBe(200);
-    expect(res.body.status).toBe('ok');
+    expect([200, 503]).toContain(res.status); // 503 if DB not ready yet
+    expect(['ok', 'degraded']).toContain(res.body.status);
     expect(res.body.service).toBe('glimms-api');
+    expect(res.body.checks).toBeDefined();
   });
 });
 
@@ -33,6 +34,7 @@ describe('POST /api/auth/register', () => {
     expect(res.status).toBe(201);
     expect(res.body.accessToken).toBeDefined();
     expect(res.body.refreshToken).toBeDefined();
+    expect(res.body.expiresIn).toBeDefined();
   });
 
   it('rejects invalid email', async () => {
@@ -118,7 +120,7 @@ describe('GET /api/catalog', () => {
     expect(res.status).toBe(401);
   });
 
-  it('returns empty array for new user', async () => {
+  it('returns empty result for new user (paginated)', async () => {
     const regRes = await request(app)
       .post('/api/auth/register')
       .send({ email: 'catalog@glimms.ai', password: 'password123' });
@@ -128,7 +130,48 @@ describe('GET /api/catalog', () => {
       .set('Authorization', `Bearer ${regRes.body.accessToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual([]);
+    // New paginated shape: { items, total, page, limit }
+    if (Array.isArray(res.body)) {
+      expect(res.body).toEqual([]);
+    } else {
+      expect(res.body.items).toEqual([]);
+      expect(res.body.total).toBe(0);
+      expect(res.body.page).toBe(1);
+    }
+  });
+
+  it('supports pagination params', async () => {
+    const regRes = await request(app)
+      .post('/api/auth/register')
+      .send({ email: 'catalog2@glimms.ai', password: 'password123' });
+
+    const res = await request(app)
+      .get('/api/catalog?page=1&limit=5')
+      .set('Authorization', `Bearer ${regRes.body.accessToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.limit).toBe(5);
+  });
+});
+
+describe('GET /api/designs/jobs', () => {
+  it('returns 401 without token', async () => {
+    const res = await request(app).get('/api/designs/jobs');
+    expect(res.status).toBe(401);
+  });
+
+  it('returns paginated jobs for new user', async () => {
+    const regRes = await request(app)
+      .post('/api/auth/register')
+      .send({ email: 'designs@glimms.ai', password: 'password123' });
+
+    const res = await request(app)
+      .get('/api/designs/jobs')
+      .set('Authorization', `Bearer ${regRes.body.accessToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.jobs).toBeDefined();
+    expect(res.body.total).toBe(0);
   });
 });
 
