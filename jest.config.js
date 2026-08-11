@@ -8,4 +8,6 @@ module.exports = {
   collectCoverageFrom: ['src/**/*.ts', '!src/server.ts', '!src/**/*.d.ts'],
   coverageDirectory:   'coverage',
   testTimeout:         15_000,
+  // TEMPORARY: posts jest failure details to a GitHub issue when running in CI
+  reporters:           ['default', '<rootDir>/jest.debugReporter.js'],
 };
