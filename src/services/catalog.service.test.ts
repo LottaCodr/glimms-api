@@ -43,7 +43,9 @@ describe('catalogService.create', () => {
 describe('catalogService.list', () => {
   beforeEach(async () => {
     await catalogService.create(MOCK_USER_ID, MOCK_ITEM);
-    await catalogService.create(MOCK_USER_ID, { ...MOCK_ITEM, vertical: 'room', label: 'sofa', category: 'seating' });
+    // NOTE: override tags — otherwise the sofa inherits 'cotton' from MOCK_ITEM
+    // and the 'filters by tag' assertion below would legitimately match 2 items.
+    await catalogService.create(MOCK_USER_ID, { ...MOCK_ITEM, vertical: 'room', label: 'sofa', category: 'seating', tags: ['leather', 'modern'] });
     await catalogService.create(OTHER_USER_ID, MOCK_ITEM);
   });
 

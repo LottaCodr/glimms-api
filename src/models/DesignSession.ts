@@ -138,7 +138,7 @@ const PipelineJobSchema = new Schema({
 }, { timestamps: true, versionKey: false });
 
 PipelineJobSchema.index({ sessionId: 1, step: 1 }, { unique: true });
-PipelineJobSchema.index({ idempotencyKey: 1 }, { unique: true });
+// NOTE: the unique index on `idempotencyKey` is declared inline on the field.
 PipelineJobSchema.index({ correlationId: 1 });
 
 export const PipelineJob = mongoose.models.PipelineJob ?? mongoose.model('PipelineJob', PipelineJobSchema);

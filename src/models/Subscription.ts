@@ -48,8 +48,8 @@ const SubscriptionSchema = new Schema<ISubscriptionDocument>(
   }
 );
 
-SubscriptionSchema.index({ userId: 1 },             { unique: true });
-SubscriptionSchema.index({ stripeCustomerId: 1 },   { sparse: true });
+// NOTE: unique(userId) and sparse(stripeCustomerId) are declared inline on the
+// fields — don't duplicate them here.
 
 export const Subscription: Model<ISubscriptionDocument> =
   mongoose.model<ISubscriptionDocument>('Subscription', SubscriptionSchema);

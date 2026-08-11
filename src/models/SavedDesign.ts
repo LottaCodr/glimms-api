@@ -99,7 +99,7 @@ const DeviceTokenSchema = new Schema<IDeviceTokenDocument>(
 );
 
 DeviceTokenSchema.index({ userId: 1 });
-DeviceTokenSchema.index({ token: 1 }, { unique: true });
+// NOTE: the unique index on `token` is declared inline on the field.
 
 export const DeviceToken: Model<IDeviceTokenDocument> =
   mongoose.model<IDeviceTokenDocument>('DeviceToken', DeviceTokenSchema);

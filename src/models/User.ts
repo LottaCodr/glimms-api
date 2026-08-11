@@ -82,7 +82,8 @@ const UserSchema = new Schema<IUserDocument>(
 
 // ── Indexes ───────────────────────────────────────────────────────────────────
 
-UserSchema.index({ email: 1 }, { unique: true });
+// NOTE: the unique index on `email` is declared inline on the field — don't
+// duplicate it here (mongoose warns about duplicate schema indexes).
 UserSchema.index({ tier: 1 });
 UserSchema.index({ createdAt: -1 });
 

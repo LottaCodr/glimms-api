@@ -2,7 +2,8 @@ import { Queue } from 'bullmq';
 import { redis } from './redis';
 import { logger } from './logger';
 
-export const designQueue = new Queue('glimms:design-pipeline', {
+// BullMQ (>=5.49) forbids ':' in queue names — it reserves ':' as the key separator.
+export const designQueue = new Queue('glimms-design-pipeline', {
   // BullMQ ships its own ioredis copy — cast to avoid duplicate-type conflicts
   connection: redis as any,
   defaultJobOptions: {
@@ -13,7 +14,7 @@ export const designQueue = new Queue('glimms:design-pipeline', {
   },
 });
 
-export const notificationQueue = new Queue('glimms:notifications', {
+export const notificationQueue = new Queue('glimms-notifications', {
   connection: redis as any,
   defaultJobOptions: { attempts: 3, backoff: { type: 'fixed', delay: 2000 } },
 });
