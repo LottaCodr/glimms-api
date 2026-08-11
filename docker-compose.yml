@@ -1,0 +1,75 @@
+version: "3.9"
+
+services:
+  api:
+    build: .
+    container_name: glimms-api
+    ports:
+      - "4000:4000"
+    env_file: .env
+    environment:
+      - MONGODB_URI=mongodb://mongo:27017/glimms
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - glimms-net
+
+  mongo:
+    image: mongo:7.0
+    container_name: glimms-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - glimms-net
+
+  mongo-express:
+    image: mongo-express:latest
+    container_name: glimms-mongo-ui
+    ports:
+      - "8082:8081"
+    environment:
+      - ME_CONFIG_MONGODB_SERVER=mongo
+      - ME_CONFIG_BASICAUTH_USERNAME=admin
+      - ME_CONFIG_BASICAUTH_PASSWORD=glimms
+    depends_on:
+      - mongo
+    profiles:
+      - dev-tools
+    networks:
+      - glimms-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: glimms-redis
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - glimms-net
+
+volumes:
+  mongo_data:
+  redis_data:
+
+networks:
+  glimms-net:
+    driver: bridge

@@ -1,0 +1,88 @@
+import rateLimit from 'express-rate-limit';
+import { RedisStore } from 'rate-limit-redis';
+import { Response, NextFunction } from 'express';
+import { redis } from '../lib/redis';
+import { config } from '../config';
+import { AuthRequest } from './auth.middleware';
+
+// ── General API rate limiter ───────────────────────────────────────────────────
+
+export const generalLimiter = rateLimit({
+  windowMs:       config.rateLimit.windowMs,
+  max:            config.rateLimit.max,
+  standardHeaders: true,
+  legacyHeaders:  false,
+  store: new RedisStore({
+    sendCommand: (...args: string[]) => redis.call(...args as [string, ...string[]]),
+  }),
+  keyGenerator: (req) => req.ip ?? 'unknown',
+  handler: (_req, res) =>
+    res.status(429).json({ error: 'Too many requests — please slow down.', code: 'RATE_LIMITED' }),
+});
+
+// ── Auth endpoint limiter — prevents brute-force ──────────────────────────────
+
+export const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,   // 15 minutes
+  max: 10,
+  store: new RedisStore({
+    sendCommand: (...args: string[]) => redis.call(...args as [string, ...string[]]),
+    prefix: 'auth_rl:',
+  }),
+  keyGenerator: (req) => `auth:${req.ip}`,
+  handler: (_req, res) =>
+    res.status(429).json({
+      error: 'Too many auth attempts. Try again in 15 minutes.',
+      code:  'AUTH_RATE_LIMITED',
+    }),
+});
+
+// ── Per-user daily scan quota ─────────────────────────────────────────────────
+
+export async function scanLimiter(
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  if (!req.user) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+
+  const { sub: userId, tier } = req.user;
+
+  // Pro users are unlimited
+  if (tier === 'pro') {
+    next();
+    return;
+  }
+
+  const maxScans = tier === 'premium'
+    ? config.stripe.premiumScanLimit
+    : config.stripe.freeScanLimit;
+
+  const today = new Date().toISOString().slice(0, 10);  // YYYY-MM-DD
+  const key   = `scan_limit:${userId}:${today}`;
+
+  const results = await redis.multi().incr(key).expire(key, 86400).exec() as any;
+  const count   = (results?.[0]?.[1] as number) ?? 0;
+
+  res.setHeader('X-Scan-Count-Today', count);
+  res.setHeader('X-Scan-Limit',       maxScans);
+  res.setHeader('X-Scan-Tier',        tier);
+
+  if (count > maxScans) {
+    res.status(429).json({
+      error:       'Daily scan limit reached',
+      scansUsed:   count - 1,
+      limit:       maxScans,
+      tier,
+      upgradeUrl:  'https://app.glimms.ai/upgrade',
+      resetsAt:    `${today}T23:59:59Z`,
+      code:        'SCAN_LIMIT_REACHED',
+    });
+    return;
+  }
+
+  next();
+}
