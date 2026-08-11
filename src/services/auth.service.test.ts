@@ -7,7 +7,8 @@ import { authService } from '../services/auth.service';
 import { User } from '../models/User';
 import { RefreshToken } from '../models/RefreshToken';
 
-const MONGO_URI = process.env.MONGODB_URI ?? 'mongodb://localhost:27017/glimms_test';
+// Each test file gets its own database so parallel jest workers never collide.
+const MONGO_URI = `${process.env.MONGODB_URI ?? 'mongodb://localhost:27017/glimms_test'}_auth`;
 
 beforeAll(async () => {
   await mongoose.connect(MONGO_URI);

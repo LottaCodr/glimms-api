@@ -2,7 +2,8 @@ import mongoose from 'mongoose';
 import { catalogService } from '../services/catalog.service';
 import { CatalogItem } from '../models/CatalogItem';
 
-const MONGO_URI = process.env.MONGODB_URI ?? 'mongodb://localhost:27017/glimms_test';
+// Each test file gets its own database so parallel jest workers never collide.
+const MONGO_URI = `${process.env.MONGODB_URI ?? 'mongodb://localhost:27017/glimms_test'}_catalog`;
 const MOCK_USER_ID = new mongoose.Types.ObjectId().toString();
 const OTHER_USER_ID = new mongoose.Types.ObjectId().toString();
 

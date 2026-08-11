@@ -2,7 +2,8 @@ import request from 'supertest';
 import mongoose from 'mongoose';
 import { createApp } from './app';
 
-const MONGO_URI = process.env.MONGODB_URI ?? 'mongodb://localhost:27017/glimms_test';
+// Each test file gets its own database so parallel jest workers never collide.
+const MONGO_URI = `${process.env.MONGODB_URI ?? 'mongodb://localhost:27017/glimms_test'}_app`;
 
 const app = createApp();
 

@@ -7,6 +7,5 @@ module.exports = {
   moduleNameMapper:    { '^@/(.*)$': '<rootDir>/src/$1' },
   collectCoverageFrom: ['src/**/*.ts', '!src/server.ts', '!src/**/*.d.ts'],
   coverageDirectory:   'coverage',
-  setupFilesAfterFramework: [],
   testTimeout:         15_000,
 };

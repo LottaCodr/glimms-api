@@ -5,7 +5,7 @@ dotenv.config();
 
 const schema = z.object({
   PORT:                     z.string().default('4000'),
-  NODE_ENV:                 z.enum(['development', 'staging', 'production']).default('development'),
+  NODE_ENV:                 z.enum(['development', 'staging', 'production', 'test']).default('development'),
 
   MONGODB_URI:              z.string().default('mongodb://localhost:27017/glimms'),
   REDIS_URL:                z.string().default('redis://localhost:6379'),
