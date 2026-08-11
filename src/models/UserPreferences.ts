@@ -59,7 +59,7 @@ const UserPreferencesSchema = new Schema<IUserPreferencesDocument>(
   }
 );
 
-UserPreferencesSchema.index({ userId: 1 }, { unique: true });
+// NOTE: the unique index on `userId` is declared inline on the field.
 
 export const UserPreferences: Model<IUserPreferencesDocument> =
   mongoose.model<IUserPreferencesDocument>('UserPreferences', UserPreferencesSchema);

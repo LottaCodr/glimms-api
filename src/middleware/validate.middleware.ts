@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { ZodSchema, ZodError } from 'zod';
 import multer from 'multer';
+import { BadRequestError } from './errorHandler.middleware';
 
 // ── Zod request validation ────────────────────────────────────────────────────
 
@@ -50,7 +51,9 @@ export const uploadMiddleware = multer({
   limits:  { fileSize: MAX_FILE_SIZE, files: 5 },
   fileFilter: (_req, file, cb) => {
     if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
-      cb(new Error(`Invalid file type: ${file.mimetype}. Allowed: JPEG, PNG, WEBP`));
+      // Use an AppError so the global handler returns 400 (a plain Error
+      // would surface as a 500 in production).
+      cb(new BadRequestError(`Invalid file type: ${file.mimetype}. Allowed: JPEG, PNG, WEBP`));
       return;
     }
     cb(null, true);

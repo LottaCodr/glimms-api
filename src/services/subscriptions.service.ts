@@ -2,7 +2,7 @@ import Stripe from 'stripe';
 import { Subscription, User } from '../models';
 import { config } from '../config';
 import { logger } from '../lib/logger';
-import { NotFoundError } from '../middleware/errorHandler.middleware';
+import { NotFoundError, AppError } from '../middleware/errorHandler.middleware';
 
 const stripe = config.stripe.secretKey
   ? new Stripe(config.stripe.secretKey, { apiVersion: '2023-10-16' as any })
@@ -28,7 +28,8 @@ export const subscriptionsService = {
   },
 
   async createCheckoutSession(userId: string, priceId: string) {
-    if (!stripe) throw new Error('Stripe is not configured');
+    // Throw a structured error — a plain Error would surface as opaque 500 in prod
+    if (!stripe) throw new AppError(503, 'Stripe is not configured', 'STRIPE_NOT_CONFIGURED');
 
     const user = await User.findById(userId);
     if (!user) throw new NotFoundError('User');

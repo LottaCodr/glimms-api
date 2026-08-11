@@ -2,7 +2,8 @@ import mongoose from 'mongoose';
 import { catalogService } from '../services/catalog.service';
 import { CatalogItem } from '../models/CatalogItem';
 
-const MONGO_URI = process.env.MONGODB_URI ?? 'mongodb://localhost:27017/glimms_test';
+// Each test file gets its own database so parallel jest workers never collide.
+const MONGO_URI = `${process.env.MONGODB_URI ?? 'mongodb://localhost:27017/glimms_test'}_catalog`;
 const MOCK_USER_ID = new mongoose.Types.ObjectId().toString();
 const OTHER_USER_ID = new mongoose.Types.ObjectId().toString();
 
@@ -42,7 +43,9 @@ describe('catalogService.create', () => {
 describe('catalogService.list', () => {
   beforeEach(async () => {
     await catalogService.create(MOCK_USER_ID, MOCK_ITEM);
-    await catalogService.create(MOCK_USER_ID, { ...MOCK_ITEM, vertical: 'room', label: 'sofa', category: 'seating' });
+    // NOTE: override tags — otherwise the sofa inherits 'cotton' from MOCK_ITEM
+    // and the 'filters by tag' assertion below would legitimately match 2 items.
+    await catalogService.create(MOCK_USER_ID, { ...MOCK_ITEM, vertical: 'room', label: 'sofa', category: 'seating', tags: ['leather', 'modern'] });
     await catalogService.create(OTHER_USER_ID, MOCK_ITEM);
   });
 
