@@ -7,7 +7,11 @@ import { authService } from '../services/auth.service';
 import { User } from '../models/User';
 import { RefreshToken } from '../models/RefreshToken';
 
-const MONGO_URI = process.env.MONGODB_URI ?? 'mongodb://localhost:27017/glimms_test';
+// Each test file gets its own database: jest runs files in parallel workers, and
+// every suite wipes its DB (dropDatabase in afterAll / deleteMany in beforeEach).
+// Sharing one DB made suites delete each other's data mid-run in CI.
+const BASE_URI = process.env.MONGODB_URI ?? 'mongodb://localhost:27017/glimms_test';
+const MONGO_URI = BASE_URI.replace(/\/([^/?]+)(\?.*)?$/, '/$1_authsvc$2');
 
 beforeAll(async () => {
   await mongoose.connect(MONGO_URI);
