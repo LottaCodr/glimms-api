@@ -22,10 +22,10 @@ export interface IUserDocument extends IUser, Document {
 
 const UserSchema = new Schema<IUserDocument>(
   {
+    // NOTE: unique index is declared once below via UserSchema.index()
     email: {
       type:     String,
       required: [true, 'Email is required'],
-      unique:   true,
       lowercase: true,
       trim:     true,
       match:    [/^\S+@\S+\.\S+$/, 'Invalid email format'],

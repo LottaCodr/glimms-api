@@ -5,6 +5,8 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only --exit-child src/server.ts",
+    "services:up": "docker compose up -d mongo redis",
+    "services:down": "docker compose stop mongo redis",
     "build": "tsc --project tsconfig.json",
     "start": "node dist/server.js",
     "lint": "eslint 'src/**/*.ts' --fix",

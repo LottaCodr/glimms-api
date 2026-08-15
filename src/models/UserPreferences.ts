@@ -33,11 +33,11 @@ const LocationSchema = new Schema<ILocation>(
 
 const UserPreferencesSchema = new Schema<IUserPreferencesDocument>(
   {
+    // NOTE: unique index is declared once below via UserPreferencesSchema.index()
     userId: {
       type:     Schema.Types.ObjectId,
       ref:      'User',
       required: true,
-      unique:   true,
     },
     occupation:  { type: String, default: null, trim: true },
     styleGoals:  { type: [String], default: [] },

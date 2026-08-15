@@ -81,10 +81,10 @@ const DeviceTokenSchema = new Schema<IDeviceTokenDocument>(
       ref:      'User',
       required: true,
     },
+    // NOTE: unique index is declared once below via DeviceTokenSchema.index()
     token: {
       type:     String,
       required: true,
-      unique:   true,
     },
     platform: {
       type:     String,

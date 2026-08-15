@@ -82,12 +82,17 @@ docker-compose --profile dev-tools up
 cp .env.example .env
 npm install
 
-# Start infra only
-docker-compose up -d mongo redis
+# Start infra only (MongoDB + Redis) — the API will NOT start without both running
+npm run services:up
+# equivalent to: docker compose up -d mongo redis
 
 # Run with hot reload
 npm run dev
 ```
+
+No Docker on your machine? Get MongoDB and Redis some other way before running `npm run dev`:
+- **MongoDB** — install [MongoDB Community Server](https://www.mongodb.com/try/download/community) locally, or use a free Atlas cluster (`MONGODB_URI` in `.env`)
+- **Redis** — on Windows use [Memurai](https://www.memurai.com/) or WSL2 (`sudo apt install redis-server && redis-server`); on macOS `brew install redis && brew services start redis`; or a hosted Redis via `REDIS_URL` in `.env`
 
 ---
 
