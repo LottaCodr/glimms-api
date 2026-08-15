@@ -46,7 +46,7 @@ describe('catalogService.create', () => {
 describe('catalogService.list', () => {
   beforeEach(async () => {
     await catalogService.create(MOCK_USER_ID, MOCK_ITEM);
-    await catalogService.create(MOCK_USER_ID, { ...MOCK_ITEM, vertical: 'room', label: 'sofa', category: 'seating' });
+    await catalogService.create(MOCK_USER_ID, { ...MOCK_ITEM, vertical: 'room', label: 'sofa', category: 'seating', tags: ['leather', 'modern'], styleTags: ['contemporary'] });
     await catalogService.create(OTHER_USER_ID, MOCK_ITEM);
   });
 
