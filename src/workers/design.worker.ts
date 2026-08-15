@@ -512,7 +512,7 @@ async function runPipeline(job: Job<any>): Promise<void> {
 // ── Worker factory ────────────────────────────────────────────────────────────
 
 export function startDesignWorker(): Worker {
-  const worker = new Worker<any>('glimms:design-pipeline', runPipeline, {
+  const worker = new Worker<any>('glimms-design-pipeline', runPipeline, {
     connection:  redis as any,
     concurrency: 5,
     limiter:     { max: 10, duration: 1000 },

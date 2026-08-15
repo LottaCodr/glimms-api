@@ -2,7 +2,11 @@ import mongoose from 'mongoose';
 import { catalogService } from '../services/catalog.service';
 import { CatalogItem } from '../models/CatalogItem';
 
-const MONGO_URI = process.env.MONGODB_URI ?? 'mongodb://localhost:27017/glimms_test';
+// Each test file gets its own database: jest runs files in parallel workers, and
+// every suite wipes its DB (dropDatabase in afterAll / deleteMany in beforeEach).
+// Sharing one DB made suites delete each other's data mid-run in CI.
+const BASE_URI = process.env.MONGODB_URI ?? 'mongodb://localhost:27017/glimms_test';
+const MONGO_URI = BASE_URI.replace(/\/([^/?]+)(\?.*)?$/, '/$1_catalogsvc$2');
 const MOCK_USER_ID = new mongoose.Types.ObjectId().toString();
 const OTHER_USER_ID = new mongoose.Types.ObjectId().toString();
 
@@ -42,7 +46,7 @@ describe('catalogService.create', () => {
 describe('catalogService.list', () => {
   beforeEach(async () => {
     await catalogService.create(MOCK_USER_ID, MOCK_ITEM);
-    await catalogService.create(MOCK_USER_ID, { ...MOCK_ITEM, vertical: 'room', label: 'sofa', category: 'seating' });
+    await catalogService.create(MOCK_USER_ID, { ...MOCK_ITEM, vertical: 'room', label: 'sofa', category: 'seating', tags: ['leather', 'modern'], styleTags: ['contemporary'] });
     await catalogService.create(OTHER_USER_ID, MOCK_ITEM);
   });
 
