@@ -25,7 +25,8 @@ export const generalLimiter = rateLimit({
 
 export const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,   // 15 minutes
-  max: 10,
+  // Tests issue more than 10 auth requests in a single run — don't throttle them
+  max: config.nodeEnv === 'test' ? 10_000 : 10,
   store: new RedisStore({
     sendCommand: (...args: string[]) => (redis as any).call(...args),
     prefix: 'auth_rl:',
