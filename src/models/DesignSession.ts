@@ -127,7 +127,8 @@ export interface IPipelineJob {
 const PipelineJobSchema = new Schema({
   sessionId: { type: Schema.Types.ObjectId, ref: 'DesignSession', required: true },
   step: { type: String, required: true },
-  idempotencyKey: { type: String, required: true, unique: true },
+  // NOTE: unique index is declared once below via PipelineJobSchema.index()
+  idempotencyKey: { type: String, required: true },
   status: { type: String, enum: ['pending','running','completed','failed'], default: 'pending' },
   attempts: { type: Number, default: 0 },
   lastError: { type: String, default: null },

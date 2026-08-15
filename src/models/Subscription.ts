@@ -18,13 +18,13 @@ export interface ISubscriptionDocument extends ISubscription, Document {}
 
 const SubscriptionSchema = new Schema<ISubscriptionDocument>(
   {
+    // NOTE: unique/sparse indexes are declared once below via SubscriptionSchema.index()
     userId: {
       type:     Schema.Types.ObjectId,
       ref:      'User',
       required: true,
-      unique:   true,
     },
-    stripeCustomerId:     { type: String, default: null, sparse: true },
+    stripeCustomerId:     { type: String, default: null },
     stripeSubscriptionId: { type: String, default: null },
     status: {
       type:    String,
