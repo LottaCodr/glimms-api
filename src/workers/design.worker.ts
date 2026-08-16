@@ -1,7 +1,6 @@
 import { Worker, Job } from 'bullmq';
 import axios from 'axios';
 import crypto from 'crypto';
-import { redis } from '../lib/redis';
 import { config } from '../config';
 import { logger } from '../lib/logger';
 import { designsService } from '../services/designs.service';
@@ -513,7 +512,13 @@ async function runPipeline(job: Job<any>): Promise<void> {
 
 export function startDesignWorker(): Worker {
   const worker = new Worker<any>('glimms-design-pipeline', runPipeline, {
-    connection:  redis as any,
+    // Workers use blocking Redis commands and BullMQ requires their clients to
+    // retry indefinitely. Pass options (rather than the shared API client) so
+    // BullMQ owns and closes these dedicated connections with worker.close().
+    connection: {
+      url: config.redis.url,
+      maxRetriesPerRequest: null,
+    },
     concurrency: 5,
     limiter:     { max: 10, duration: 1000 },
   });
@@ -523,6 +528,9 @@ export function startDesignWorker(): Worker {
 
   worker.on('failed', (job, err) =>
     logger.error({ jobId: (job?.data as any)?.jobId ?? (job?.data as any)?.sessionId, err: err.message }, 'Worker: job failed'));
+
+  worker.on('error', err =>
+    logger.error({ err }, 'Worker: Redis connection error'));
 
   worker.on('stalled', jobId =>
     logger.warn({ jobId }, 'Worker: job stalled'));

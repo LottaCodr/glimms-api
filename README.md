@@ -92,7 +92,7 @@ npm run dev
 
 No Docker on your machine? Get MongoDB and Redis some other way before running `npm run dev`:
 - **MongoDB** — install [MongoDB Community Server](https://www.mongodb.com/try/download/community) locally, or use a free Atlas cluster (`MONGODB_URI` in `.env`)
-- **Redis** — on Windows use [Memurai](https://www.memurai.com/) or WSL2 (`sudo apt install redis-server && redis-server`); on macOS `brew install redis && brew services start redis`; or a hosted Redis via `REDIS_URL` in `.env`
+- **Redis** — on Windows use [Memurai](https://www.memurai.com/) or WSL2 (`sudo apt install redis-server && redis-server`); on macOS `brew install redis && brew services start redis`; or a hosted Redis via `REDIS_URL` in `.env`. BullMQ requires the Redis eviction policy to be `noeviction`; for a local server, set it with `redis-cli CONFIG SET maxmemory-policy noeviction` (and persist it in your Redis configuration).
 
 ---
 
