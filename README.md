@@ -180,6 +180,75 @@ Each step's URL is configurable via `.env`. If an AI service is down, the worker
 
 ---
 
+## Connecting to the AI services
+
+The AI tier can be deployed in either of two shapes, and the API supports both.
+
+### A — Single gateway (hosted deployment)
+
+All eight services sit behind one origin and are addressed by path prefix
+(`/object-detection/…`, `/quality-guard/…`). Set one variable:
+
+```bash
+AI_GATEWAY_URL=https://glimms-ai.onrender.com
+```
+
+The API derives every service URL from it — `AI_GATEWAY_URL` +
+`/<service-name>` — so `qualityGuard` resolves to
+`https://glimms-ai.onrender.com/quality-guard` and its `POST /check` lands on
+`https://glimms-ai.onrender.com/quality-guard/check`.
+
+Two settings usually belong with it on a free hosting tier:
+
+```bash
+AI_TIMEOUT_MULTIPLIER=5   # instances sleep when idle and take ~30-60s to wake
+AI_ALLOW_DEGRADED=true    # lightweight build runs offline fallbacks (see below)
+```
+
+### B — One URL per service (docker-compose / k8s)
+
+```bash
+AI_OBJECT_DETECTION_URL=http://object-detection:8001
+AI_ATTRIBUTE_EXTRACTOR_URL=http://attribute-extractor:8002
+# …
+```
+
+Resolution order per service: **`AI_<SERVICE>_URL` → `AI_GATEWAY_URL` →
+`http://localhost:800X`.** A per-service value always wins, so you can run
+seven services through a gateway and pin one elsewhere. Blank values count as
+unset, and trailing slashes are trimmed.
+
+### Verifying the connection
+
+```bash
+AI_GATEWAY_URL=https://glimms-ai.onrender.com npm run ai:check
+```
+
+Prints the resolved base URL for each service, how it was resolved, and its
+`/health` response; exits non-zero if any service is unreachable, so it can gate
+a deploy. At runtime the same information is served by `GET /health/ready`.
+
+### `ok` vs `degraded` vs `unavailable`
+
+`GET /health/ready` classifies each service:
+
+| Status | Meaning |
+|---|---|
+| `ok` | Reachable, running its real backend |
+| `degraded` | Reachable, but on a fallback backend — `model_loaded:false`, in-memory vectors instead of Pinecone, offline LLM |
+| `unavailable` | Not reachable |
+
+The lightweight all-in-one image deliberately runs deterministic offline
+fallbacks (no torch/CLIP/YOLO/rembg/Pinecone), so it reports `degraded` for
+object-detection and embedding-engine and `/health/ready` returns **503** by
+default. Set `AI_ALLOW_DEGRADED=true` to treat those as ready — an unreachable
+service still fails readiness. Build the per-service images
+(`docker compose build`) for the full models.
+
+> The frontend must never call the AI services directly — only this API does.
+
+---
+
 ## Mongoose Models
 
 | Model | Collection | Key indexes |
@@ -206,6 +275,9 @@ REDIS_URL=redis://localhost:6379
 JWT_SECRET=<32+ chars>
 REFRESH_TOKEN_SECRET=<32+ chars>
 ```
+
+To point at the hosted AI tier instead of local AI containers, add
+`AI_GATEWAY_URL` — see [Connecting to the AI services](#connecting-to-the-ai-services).
 
 ---
 

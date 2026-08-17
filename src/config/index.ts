@@ -1,7 +1,12 @@
 import dotenv from 'dotenv';
 import { z } from 'zod';
+import { resolveAiUrls, resolveAiUrlsDetailed, normalizeBaseUrl } from './aiUrls';
 
 dotenv.config();
+
+/** Treat `FOO=` (blank) in a .env file as "not set" rather than an invalid value. */
+const blankAsUndefined = <T extends z.ZodTypeAny>(inner: T) =>
+  z.preprocess((v) => (typeof v === 'string' && v.trim() === '' ? undefined : v), inner);
 
 const schema = z.object({
   PORT:                     z.string().default('4000'),
@@ -22,14 +27,23 @@ const schema = z.object({
   S3_BUCKET:                z.string().default('glimms-images'),
   S3_PRESIGN_EXPIRY_SECONDS: z.string().default('900'),
 
-  AI_OBJECT_DETECTION_URL:     z.string().default('http://localhost:8001'),
-  AI_ATTRIBUTE_EXTRACTOR_URL:  z.string().default('http://localhost:8002'),
-  AI_EMBEDDING_ENGINE_URL:     z.string().default('http://localhost:8003'),
-  AI_PERMUTATION_ENGINE_URL:   z.string().default('http://localhost:8004'),
-  AI_LLM_REASONING_URL:        z.string().default('http://localhost:8005'),
-  AI_MOCKUP_COMPOSITOR_URL:    z.string().default('http://localhost:8006'),
-  AI_QUALITY_GUARD_URL:        z.string().default('http://localhost:8007'),
-  AI_CONTEXT_INFERENCE_URL:    z.string().default('http://localhost:8008'),
+  // AI services — either one gateway (AI_GATEWAY_URL, path-prefixed) or a URL
+  // per service. Per-service values win; see ./aiUrls.ts for resolution rules.
+  AI_GATEWAY_URL:              blankAsUndefined(z.string().url().optional()),
+  AI_OBJECT_DETECTION_URL:     z.string().optional(),
+  AI_ATTRIBUTE_EXTRACTOR_URL:  z.string().optional(),
+  AI_EMBEDDING_ENGINE_URL:     z.string().optional(),
+  AI_PERMUTATION_ENGINE_URL:   z.string().optional(),
+  AI_LLM_REASONING_URL:        z.string().optional(),
+  AI_MOCKUP_COMPOSITOR_URL:    z.string().optional(),
+  AI_QUALITY_GUARD_URL:        z.string().optional(),
+  AI_CONTEXT_INFERENCE_URL:    z.string().optional(),
+  // Scales every AI request timeout. Hosted free tiers (Render) cold-start in
+  // ~30-60s after idling, which blows the default per-call timeouts.
+  AI_TIMEOUT_MULTIPLIER:       blankAsUndefined(z.string().default('1')),
+  // Treat 'degraded' AI services (model_loaded:false / in-memory vector store,
+  // i.e. the lightweight fallback build) as ready in GET /health/ready.
+  AI_ALLOW_DEGRADED:           blankAsUndefined(z.enum(['true','false']).default('false')),
 
   STRIPE_SECRET_KEY:           z.string().optional(),
   STRIPE_WEBHOOK_SECRET:       z.string().optional(),
@@ -67,6 +81,14 @@ if (!parsed.success) {
 
 const e = parsed.data;
 
+const aiUrls         = resolveAiUrls(process.env);
+const aiUrlsDetailed = resolveAiUrlsDetailed(process.env);
+
+const timeoutMultiplier = (() => {
+  const n = parseFloat(e.AI_TIMEOUT_MULTIPLIER);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+})();
+
 export const config = {
   port:    parseInt(e.PORT),
   nodeEnv: e.NODE_ENV,
@@ -91,15 +113,24 @@ export const config = {
   },
 
   ai: {
-    objectDetection:    e.AI_OBJECT_DETECTION_URL,
-    attributeExtractor: e.AI_ATTRIBUTE_EXTRACTOR_URL,
-    embeddingEngine:    e.AI_EMBEDDING_ENGINE_URL,
-    permutationEngine:  e.AI_PERMUTATION_ENGINE_URL,
-    llmReasoning:       e.AI_LLM_REASONING_URL,
-    mockupCompositor:   e.AI_MOCKUP_COMPOSITOR_URL,
-    qualityGuard:       e.AI_QUALITY_GUARD_URL,
-    contextInference:   e.AI_CONTEXT_INFERENCE_URL,
+    objectDetection:    aiUrls.objectDetection,
+    attributeExtractor: aiUrls.attributeExtractor,
+    embeddingEngine:    aiUrls.embeddingEngine,
+    permutationEngine:  aiUrls.permutationEngine,
+    llmReasoning:       aiUrls.llmReasoning,
+    mockupCompositor:   aiUrls.mockupCompositor,
+    qualityGuard:       aiUrls.qualityGuard,
+    contextInference:   aiUrls.contextInference,
   },
+
+  /** Set when all services are reached through one path-prefixed origin. */
+  aiGatewayUrl: e.AI_GATEWAY_URL ? normalizeBaseUrl(e.AI_GATEWAY_URL) : undefined,
+  /** How each URL above was resolved — surfaced by GET /health/ready. */
+  aiUrlSources: aiUrlsDetailed,
+  /** Multiplier applied to every AI HTTP timeout (cold-start headroom). */
+  aiTimeoutMultiplier: timeoutMultiplier,
+  /** Whether GET /health/ready passes when services run offline/fallback backends. */
+  aiAllowDegraded: e.AI_ALLOW_DEGRADED === 'true',
 
   stripe: {
     secretKey:        e.STRIPE_SECRET_KEY,

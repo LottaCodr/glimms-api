@@ -1,5 +1,6 @@
 import axios, { AxiosRequestConfig } from 'axios';
 import { config } from '../config';
+import { aiUrlsBySlug } from '../config/aiUrls';
 import { logger } from './logger';
 
 /**
@@ -27,6 +28,11 @@ function headers(correlationId: string, requestId?: string) {
     h['Authorization'] = `Bearer ${config.aiInternalToken}`;
   }
   return h;
+}
+
+/** Scale a timeout by AI_TIMEOUT_MULTIPLIER (headroom for hosted cold starts). */
+function t(ms: number): number {
+  return Math.round(ms * config.aiTimeoutMultiplier);
 }
 
 async function callWithRetry<T>(fn: () => Promise<T>, opts: { retries: number; correlationId: string; step: string }): Promise<T> {
@@ -60,7 +66,7 @@ export const aiClient = {
     return callWithRetry(async () => {
       const { data } = await axios.post(`${config.ai.qualityGuard}/check`, { image_keys: imageKeys }, {
         headers: headers(correlationId),
-        timeout: 15_000,
+        timeout: t(15_000),
       } as AxiosRequestConfig);
       // Normalize: guide expects { results:[{image_key, acceptable, issues, quality_score, blur_score,...}], passed, passed_count }
       return data;
@@ -72,7 +78,7 @@ export const aiClient = {
     return callWithRetry(async () => {
       const { data } = await axios.post(`${config.ai.objectDetection}/detect`, { image_keys: imageKeys, vertical }, {
         headers: headers(correlationId),
-        timeout: 30_000,
+        timeout: t(30_000),
       });
       return data as { items: any[], image_count:number, detected_count:number, failed_count:number, errors:any[] };
     }, { retries: 2, correlationId, step: 'detection' });
@@ -83,7 +89,7 @@ export const aiClient = {
     return callWithRetry(async () => {
       const { data } = await axios.post(`${config.ai.attributeExtractor}/extract`, { items }, {
         headers: headers(correlationId),
-        timeout: 30_000,
+        timeout: t(30_000),
       });
       return data as { items: any[] };
     }, { retries: 2, correlationId, step: 'attributes' });
@@ -105,7 +111,7 @@ export const aiClient = {
       if (params.climate?.temperature_c != null) body.temperature_c = params.climate.temperature_c;
       const { data } = await axios.post(`${config.ai.contextInference}/infer`, body, {
         headers: headers(correlationId),
-        timeout: 5_000,
+        timeout: t(5_000),
       });
       return data;
     }, { retries: 1, correlationId, step: 'context' });
@@ -124,14 +130,14 @@ export const aiClient = {
       try {
         const { data } = await axios.post(`${config.ai.permutationEngine}/generate`, body, {
           headers: headers(correlationId),
-          timeout: 30_000,
+          timeout: t(30_000),
         });
         return { permutations: data.permutations ?? data.permutations ?? [], count: data.count, truncated: data.truncated };
       } catch (e:any) {
         if (e.response?.status === 404) {
           const { data } = await axios.post(`${config.ai.permutationEngine}/permute`, {
             items: params.items, context: params.context, vertical: params.vertical, count: params.max_permutations ?? 20
-          }, { headers: headers(correlationId), timeout: 30_000 });
+          }, { headers: headers(correlationId), timeout: t(30_000) });
           return { permutations: data.permutations ?? [], count: data.permutations?.length ?? 0, truncated: data.truncated ?? false };
         }
         throw e;
@@ -146,7 +152,7 @@ export const aiClient = {
       try {
         const { data } = await axios.post(`${config.ai.embeddingEngine}/upsert`, { namespace, vectors }, {
           headers: headers(correlationId),
-          timeout: 10_000,
+          timeout: t(10_000),
         });
         return data;
       } catch (e:any) {
@@ -162,7 +168,7 @@ export const aiClient = {
   async searchEmbeddings(embedding: number[], topK:number, namespace:string, filter:any, correlationId: string) {
     return callWithRetry(async () => {
       const { data } = await axios.post(`${config.ai.embeddingEngine}/search`, { embedding, top_k: topK, namespace, filter }, {
-        headers: headers(correlationId), timeout: 10_000,
+        headers: headers(correlationId), timeout: t(10_000),
       });
       return data;
     }, { retries: 1, correlationId, step: 'embedding_search' });
@@ -173,7 +179,7 @@ export const aiClient = {
     return callWithRetry(async () => {
       const { data } = await axios.post(`${config.ai.llmReasoning}/reason`, { vertical, context, permutations }, {
         headers: headers(correlationId),
-        timeout: 60_000,
+        timeout: t(60_000),
       });
       return data as { designs:any[], count:number };
     }, { retries: 2, correlationId, step: 'reasoning' });
@@ -194,7 +200,7 @@ export const aiClient = {
       try {
         const { data } = await axios.post(`${config.ai.mockupCompositor}/compose`, body, {
           headers: headers(correlationId),
-          timeout: 90_000,
+          timeout: t(90_000),
         });
         // guide returns { output_key, url, width, height, layers }
         if (data.output_key) return data;
@@ -212,26 +218,26 @@ export const aiClient = {
 
   // Helper to check readiness per guide §4
   async checkReadiness(): Promise<Record<string, any>> {
-    const services: Record<string,string> = {
-      'object-detection': config.ai.objectDetection,
-      'attribute-extractor': config.ai.attributeExtractor,
-      'embedding-engine': config.ai.embeddingEngine,
-      'permutation-engine': config.ai.permutationEngine,
-      'llm-reasoning': config.ai.llmReasoning,
-      'mockup-compositor': config.ai.mockupCompositor,
-      'quality-guard': config.ai.qualityGuard,
-      'context-inference': config.ai.contextInference,
-    };
+    const services = aiUrlsBySlug({
+      objectDetection:    config.ai.objectDetection,
+      attributeExtractor: config.ai.attributeExtractor,
+      embeddingEngine:    config.ai.embeddingEngine,
+      permutationEngine:  config.ai.permutationEngine,
+      llmReasoning:       config.ai.llmReasoning,
+      mockupCompositor:   config.ai.mockupCompositor,
+      qualityGuard:       config.ai.qualityGuard,
+      contextInference:   config.ai.contextInference,
+    });
     const results: Record<string,any> = {};
     await Promise.all(Object.entries(services).map(async ([name, url])=>{
       try{
-        const { data } = await axios.get(`${url}/health`, { timeout: 2000 });
+        const { data } = await axios.get(`${url}/health`, { timeout: t(5_000) });
         const modelLoaded = (data as any).model_loaded;
         const backend = (data as any).backend;
         const isProdReady = config.isDev ? true : (modelLoaded !== false && backend !== 'memory');
-        results[name] = { status: isProdReady ? 'ok' : 'degraded', detail: data };
+        results[name] = { status: isProdReady ? 'ok' : 'degraded', url, detail: data };
       } catch(err:any){
-        results[name] = { status: 'unavailable', error: err.message };
+        results[name] = { status: 'unavailable', url, error: err.message };
       }
     }));
     return results;
