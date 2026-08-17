@@ -1,8 +1,8 @@
 import sharp from 'sharp';
 import crypto from 'crypto';
-import axios from 'axios';
+import { randomUUID } from 'crypto';
 import { uploadToS3 } from '../lib/s3';
-import { config } from '../config';
+import { aiClient } from '../lib/aiClient';
 import { logger } from '../lib/logger';
 
 export const scansService = {
@@ -14,7 +14,13 @@ export const scansService = {
     contextData: Record<string, unknown>,
   ): Promise<{ uploadedKeys: string[]; qualityWarning: string | null }> {
 
+    const correlationId = randomUUID();
     const uploadedKeys: string[] = [];
+
+    logger.info(
+      { userId, vertical, imageCount: files.length, contextKeys: Object.keys(contextData ?? {}), correlationId },
+      'Processing scan upload',
+    );
 
     for (const file of files) {
       // Normalise: auto-rotate from EXIF, resize to 2048px max, strip metadata, JPEG
@@ -30,25 +36,25 @@ export const scansService = {
       logger.info({ key, bytes: normalised.length }, 'Image uploaded to S3');
     }
 
-    // Quality check on the first image (non-blocking — warn, don't reject)
+    // Quality check on the uploaded S3 keys (non-blocking — warn, don't reject).
+    // The service takes S3 object keys, never image bytes or URLs: that is what
+    // stops it being usable as an SSRF proxy.
     let qualityWarning: string | null = null;
 
     if (uploadedKeys.length > 0) {
       try {
-        const b64 = files[0].buffer.toString('base64');
-        const { data } = await axios.post(
-          `${config.ai.qualityGuard}/check`,
-          { image_data: b64, context: contextData, vertical },
-          { timeout: 8_000 },
-        );
+        const data: any = await aiClient.qualityGuard(uploadedKeys, correlationId);
 
-        if (!data.passed) {
-          qualityWarning = data.guidance ?? 'Image quality is low. Try re-capturing in better light.';
-          logger.warn({ issues: data.issues }, 'Image quality warning');
+        if (data.passed === false) {
+          const issues = (data.results ?? [])
+            .filter((r: any) => r.acceptable === false)
+            .flatMap((r: any) => r.guidance ?? r.issues ?? []);
+          qualityWarning = issues[0] ?? 'Image quality is low. Try re-capturing in better light.';
+          logger.warn({ issues, correlationId }, 'Image quality warning');
         }
-      } catch {
+      } catch (err: any) {
         // Quality guard is best-effort — never block the upload
-        logger.warn('Quality guard unavailable — skipping check');
+        logger.warn({ err: err.message, correlationId }, 'Quality guard unavailable — skipping check');
       }
     }
 

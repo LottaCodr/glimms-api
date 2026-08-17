@@ -180,6 +180,139 @@ Each step's URL is configurable via `.env`. If an AI service is down, the worker
 
 ---
 
+## Connecting to the AI services
+
+The Glimms AI tier is an **internal dependency, never a public one**. This API is
+the only public entry point: it owns auth, sessions, the database, S3 presigning
+and the job queue, and calls Glimms server-to-server. Never call the AI URL from
+browser or mobile code — even with a token, shipping it to a client hands over
+the pipeline and the bucket.
+
+```
+client ──HTTPS+auth──> glimms-api ──server-to-server──> glimms-ai gateway
+```
+
+### A — Single gateway (hosted deployment)
+
+All eight services run in one container behind one origin, addressed by path
+prefix (`/object-detection/…`, `/quality-guard/…`):
+
+```bash
+AI_GATEWAY_URL=https://glimms-ai.onrender.com   # alias: GLIMMS_BASE_URL
+AI_INTERNAL_TOKEN=<same value as AI_INTERNAL_TOKEN on the deployment>
+GLIMMS_TIMEOUT_MS=120000
+```
+
+Every service URL is derived from that one variable — `AI_GATEWAY_URL` +
+`/<service-name>` — so `POST /check` on quality-guard lands on
+`https://glimms-ai.onrender.com/quality-guard/check`.
+
+**The token is required.** Once `AI_INTERNAL_TOKEN` is set on the deployment
+(mandatory there when `GLIMMS_ENV=production` — the container refuses to boot
+without it), every endpoint except `/livez` returns 401 without
+`Authorization: Bearer …`. That includes the health endpoints. Rotation is
+additive: the gateway accepts a comma-separated list, so add the new value,
+redeploy callers, then drop the old one.
+
+### B — One URL per service (docker-compose / k8s)
+
+```bash
+AI_OBJECT_DETECTION_URL=http://object-detection:8001
+AI_ATTRIBUTE_EXTRACTOR_URL=http://attribute-extractor:8002
+# …
+```
+
+Resolution order per service: **`AI_<SERVICE>_URL` → `AI_GATEWAY_URL` →
+`http://localhost:800X`.** A per-service value always wins, so you can run seven
+services through a gateway and pin one elsewhere. Blank values count as unset,
+and trailing slashes are trimmed.
+
+### Client policy (all of it lives in `src/lib/aiClient.ts`)
+
+Every AI call goes through `aiClient`, so these apply uniformly — including to
+health probes. Nothing else in the codebase should call the AI tier directly.
+
+| Concern | Behaviour | Env |
+|---|---|---|
+| Auth | `Authorization: Bearer` on every request except `/livez` | `AI_INTERNAL_TOKEN` |
+| Correlation | `X-Correlation-ID` sent and echoed back; log it per job | — |
+| Timeouts | 20s rule-based, 45s image-backed, 120s reasoning/compose | `GLIMMS_TIMEOUT_MS`, `AI_TIMEOUT_MULTIPLIER` |
+| Retries | Only connection resets, 429, 502/503/504; honours `Retry-After`; exponential backoff with jitter | `AI_MAX_RETRIES` |
+| Concurrency | Semaphore caps in-flight upstream requests (gateway's own cap is 16) | `AI_MAX_CONCURRENCY` |
+| Circuit breaker | After N consecutive failures, fail fast with a retryable error | `AI_BREAKER_THRESHOLD`, `AI_BREAKER_RESET_MS` |
+
+Because the free tier sleeps when idle and takes 30–60s to wake, **run the
+pipeline in the worker/queue, never inside an HTTP handler**, and consider a
+cheap periodic `GET /livez` as a warmer.
+
+### Health, readiness, and degradation
+
+The gateway exposes three signals; `aiClient` prefers the aggregated ones, so
+readiness costs **one** request instead of eight:
+
+| Endpoint | Token | Meaning |
+|---|---|---|
+| `GET /livez` | no | Gateway process is up |
+| `GET /health` | yes | Per-service detail + `production_ready` + `degradations[]` |
+| `GET /readyz` | yes | 503 unless every service is running its real backend |
+
+`GET /health/ready` on this API surfaces all of it, classifying each service:
+
+| Status | Meaning |
+|---|---|
+| `ok` | Reachable, running its real backend |
+| `degraded` | Reachable, but on a fallback the gateway names in `degradations[]` |
+| `unavailable` | Not reachable, or the token was rejected |
+
+The hosted all-in-one image deliberately ships without torch/YOLO/CLIP/rembg/
+Pinecone, so it currently reports `production_ready: false`:
+
+- **detections are deterministic prototypes**, not real detections;
+- **attributes are offline pseudo-embeddings**, not CLIP vectors — comparable to
+  each other, meaningless against real CLIP space;
+- **vectors live in process memory**, wiped on every deploy, restart and idle
+  spin-down. Keep your own store as the system of record;
+- **LLM output comes from a keyless, rate-limited free provider.**
+
+That makes it a good integration/staging target, not a production one. Set
+`AI_ALLOW_DEGRADED=true` to let `/health/ready` pass against it — unreachable
+services still fail readiness — and store `degraded: true` on any session
+produced that way (`aiClient.isDegraded()`) so those results can be found and
+re-run later.
+
+When the deployment runs with `GLIMMS_ENV=production` (or
+`ALLOW_DEV_FALLBACKS=false`), the affected endpoints return 503 with a
+machine-readable body instead of prototype output. `aiClient` turns that into a
+typed `AiFallbackBlockedError` carrying `service`, `reason` and `remedy`, and
+**never retries it** — it is a configuration problem, not a blip. The rule-based
+services (context-inference, permutation-engine, quality-guard) have no fallback
+to block and keep working.
+
+### S3 is a shared prerequisite
+
+`/quality-guard`, `/object-detection`, `/attribute-extractor` and
+`/mockup-compositor` take **S3 object keys, not URLs** — deliberately, so they
+cannot be used as an SSRF proxy. The AI deployment must therefore share this
+API's bucket and credentials, or those four endpoints cannot work at all. The
+live deployment currently reports `s3_configured: false`.
+
+`/compose` returns `signed_url` (short-lived) alongside `output_key`. Persist
+`output_key` as the durable reference and mint a fresh presigned URL per read.
+
+### Verifying the connection
+
+```bash
+AI_GATEWAY_URL=https://glimms-ai.onrender.com \
+AI_INTERNAL_TOKEN=... npm run ai:check
+```
+
+Checks `/livez`, `/health` and `/readyz`, prints each service with any active
+degradation, and exits non-zero if anything is unreachable or the credentials
+are rejected — so it can gate a deploy. A degraded-but-reachable tier exits 0
+and warns.
+
+---
+
 ## Mongoose Models
 
 | Model | Collection | Key indexes |
@@ -206,6 +339,9 @@ REDIS_URL=redis://localhost:6379
 JWT_SECRET=<32+ chars>
 REFRESH_TOKEN_SECRET=<32+ chars>
 ```
+
+To point at the hosted AI tier instead of local AI containers, add
+`AI_GATEWAY_URL` — see [Connecting to the AI services](#connecting-to-the-ai-services).
 
 ---
 

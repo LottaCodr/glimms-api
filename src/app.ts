@@ -126,31 +126,36 @@ export function createApp(): Express {
 
   // AI services readiness (per guide §4: liveness vs readiness, model_loaded)
   app.get('/health/ready', async (_req, res) => {
-    const aiChecks: Record<string, any> = {};
-    const urls: Record<string,string> = {
-      'object-detection': config.ai.objectDetection,
-      'attribute-extractor': config.ai.attributeExtractor,
-      'embedding-engine': config.ai.embeddingEngine,
-      'permutation-engine': config.ai.permutationEngine,
-      'llm-reasoning': config.ai.llmReasoning,
-      'mockup-compositor': config.ai.mockupCompositor,
-      'quality-guard': config.ai.qualityGuard,
-      'context-inference': config.ai.contextInference,
-    };
-    const axios = (await import('axios')).default;
-    await Promise.all(Object.entries(urls).map(async ([name, url]) => {
+    const { aiClient } = await import('./lib/aiClient');
+    const { summarizeReadiness } = await import('./lib/readiness');
+
+    // The gateway's own /health is authoritative about which services are
+    // running fallbacks, so prefer its production_ready + degradations.
+    let productionReady: boolean | null = null;
+    let degradations: Array<{ service: string; reason: string }> = [];
+    if (config.aiGatewayUrl) {
       try {
-        const r = await axios.get(`${url}/health`, { timeout: 2000 });
-        const data = r.data as any;
-        // Guide: detector with model_loaded:false is dev-only; Pinecone memory backend not prod
-        const isProdReady = config.isDev ? true : (data.model_loaded !== false && data.backend !== 'memory');
-        aiChecks[name] = { status: isProdReady ? 'ok' : 'degraded', detail: data };
-      } catch (e:any) {
-        aiChecks[name] = { status: 'unavailable', error: e.message };
+        const health = await aiClient.gatewayHealth();
+        productionReady = health.production_ready ?? null;
+        degradations    = health.degradations ?? [];
+      } catch {
+        productionReady = null; // reported per-service below
       }
-    }));
-    const allOk = Object.values(aiChecks).every((c:any)=>c.status==='ok');
-    res.status(allOk ? 200 : 503).json({ status: allOk ? 'ok' : 'degraded', checks: aiChecks, ts: new Date().toISOString() });
+    }
+
+    const aiChecks = await aiClient.checkReadiness();
+    const { status, ready } = summarizeReadiness(aiChecks, { allowDegraded: config.aiAllowDegraded });
+
+    res.status(ready ? 200 : 503).json({
+      status,
+      ready,
+      gateway: config.aiGatewayUrl ?? null,
+      // false = the AI tier is returning prototype output, not real model results
+      production_ready: productionReady,
+      degradations,
+      checks:  aiChecks,
+      ts:      new Date().toISOString(),
+    });
   });
 
   // ── API routes — legacy (deprecated but kept) ─────────────────────────────

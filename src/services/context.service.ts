@@ -1,6 +1,8 @@
 import axios from 'axios';
+import { randomUUID } from 'crypto';
 import { redis } from '../lib/redis';
 import { config } from '../config';
+import { aiClient } from '../lib/aiClient';
 import { logger } from '../lib/logger';
 
 export const contextService = {
@@ -41,25 +43,29 @@ export const contextService = {
       }
     }
 
-    // 2. Style constraints from AI context inference service
+    // 2. Style constraints from AI context inference service.
+    // Routed through aiClient so the call carries the gateway bearer token,
+    // correlation ID, retry/backoff policy and the concurrency cap.
     let constraints: Record<string, unknown> = {};
     try {
-      const { data } = await axios.post(
-        `${config.ai.contextInference}/infer`,
+      const data: any = await aiClient.inferContext(
         {
-          temperature_c: (climateData.temp as number),
-          condition:     climateData.condition,
-          lat,
-          lon,
-          region:     opts.culturalCtx,
+          vertical:   'wardrobe',
+          climate:    {
+            temperature_c: climateData.temp as number,
+            humidity:      climateData.humidity as number,
+            condition:     climateData.condition,
+          },
+          culture:    opts.culturalCtx,
           occasion:   opts.occasion   ?? 'casual',
           occupation: opts.occupation ?? 'general',
         },
-        { timeout: 5_000 },
+        randomUUID(),
       );
-      constraints = data.constraints ?? {};
-    } catch {
-      logger.warn('Context inference unavailable — using empty constraints');
+      // The service returns style_constraints; older builds returned constraints.
+      constraints = data.style_constraints ?? data.constraints ?? {};
+    } catch (err: any) {
+      logger.warn({ err: err.message }, 'Context inference unavailable — using empty constraints');
     }
 
     const context = {
