@@ -1,5 +1,4 @@
 import { Worker, Job } from 'bullmq';
-import axios from 'axios';
 import crypto from 'crypto';
 import { config } from '../config';
 import { logger } from '../lib/logger';
@@ -55,20 +54,19 @@ async function runOnce(
 // ── Legacy pipeline (for /api/scans/upload → DesignJob) ─────────────────────
 async function runLegacyPipeline(job: Job<DesignJobData>): Promise<void> {
   const { jobId, userId, vertical, imageKeys, contextData } = job.data as any;
+  // One correlation ID for the whole job — the gateway echoes it on every
+  // response (including errors), so it ties the job to upstream logs.
+  const correlationId = `job_${jobId}`;
 
-  logger.info({ jobId, userId, vertical }, '▶  Legacy design pipeline started');
+  logger.info({ jobId, userId, vertical, correlationId }, '▶  Legacy design pipeline started');
 
   try {
     await designsService.updateJobStatus(jobId, 'processing');
     emit(jobId, 'job:update', { status: 'processing', step: 'detecting', progress: 10 });
 
     // 2. Object detection
-    const detectionRes = await axios.post(
-      `${config.ai.objectDetection}/detect`,
-      { image_keys: imageKeys, vertical },
-      { timeout: 30_000, headers: config.aiInternalToken ? { Authorization: `Bearer ${config.aiInternalToken}` } : {} },
-    );
-    const detectedItems: Record<string, unknown>[] = (detectionRes.data as any).items ?? [];
+    const detectionRes = await aiClient.detect(imageKeys, vertical, correlationId);
+    const detectedItems: Record<string, unknown>[] = (detectionRes as any).items ?? [];
     logger.info({ jobId, count: detectedItems.length }, 'Detection complete');
 
     if (!detectedItems.length) {
@@ -86,31 +84,25 @@ async function runLegacyPipeline(job: Job<DesignJobData>): Promise<void> {
 
     emit(jobId, 'job:update', { status: 'processing', step: 'extracting', progress: 25, itemCount: detectedItems.length });
 
-    const attrRes = await axios.post(
-      `${config.ai.attributeExtractor}/extract`,
-      { items: detectedItems },
-      { timeout: 30_000, headers: config.aiInternalToken ? { Authorization: `Bearer ${config.aiInternalToken}` } : {} },
-    );
-    const enrichedItems: Record<string, unknown>[] = (attrRes.data as any).items ?? [];
+    const attrRes = await aiClient.extract(detectedItems, correlationId);
+    const enrichedItems: Record<string, unknown>[] = (attrRes as any).items ?? [];
     logger.info({ jobId }, 'Attribute extraction complete');
 
     emit(jobId, 'job:update', { status: 'processing', step: 'embedding', progress: 40 });
 
-    // Fire-and-forget Pinecone upsert (non-blocking)
-    for (const item of enrichedItems) {
-      const embedding = (item as any)['embedding'] as number[] | undefined;
-      if (embedding?.length) {
-        axios.post(
-          `${config.ai.embeddingEngine}/upsert`,
-          {
-            item_id:   `${userId}:${(item as any)['label']}:${Date.now()}`,
-            user_id:   userId,
-            embedding,
-            metadata:  { vertical, label: (item as any)['label'], category: (item as any)['category'], userId },
-          },
-          { timeout: 10_000, headers: config.aiInternalToken ? { Authorization: `Bearer ${config.aiInternalToken}` } : {} },
-        ).catch(e => logger.warn({ err: (e as any).message }, 'Embedding upsert failed (non-fatal)'));
-      }
+    // Fire-and-forget vector upsert (non-blocking). Batched into one call —
+    // the gateway runs all eight services in one container, so per-item calls
+    // burn the concurrency budget for no benefit.
+    const legacyVectors = enrichedItems
+      .filter(item => ((item as any)['embedding'] as number[] | undefined)?.length)
+      .map(item => ({
+        id: `${userId}:${(item as any)['label']}:${Date.now()}`,
+        embedding: (item as any)['embedding'] as number[],
+        metadata: { vertical, label: (item as any)['label'], category: (item as any)['category'], user_id: userId },
+      }));
+    if (legacyVectors.length) {
+      aiClient.upsertEmbeddings(legacyVectors, 'items', correlationId)
+        .catch(e => logger.warn({ err: (e as any).message }, 'Embedding upsert failed (non-fatal)'));
     }
 
     const catalogItems = enrichedItems.map(item => ({
@@ -132,32 +124,47 @@ async function runLegacyPipeline(job: Job<DesignJobData>): Promise<void> {
 
     emit(jobId, 'job:update', { status: 'processing', step: 'permutating', progress: 55 });
 
-    const permRes = await axios.post(
-      `${config.ai.permutationEngine}/permute`,
-      { items: enrichedItems, context: contextData, vertical, count: 20 },
-      { timeout: 30_000, headers: config.aiInternalToken ? { Authorization: `Bearer ${config.aiInternalToken}` } : {} },
+    const permRes = await aiClient.generatePermutations(
+      { vertical, items: enrichedItems, context: contextData, max_permutations: 20 },
+      correlationId,
     );
-    const permutations: Record<string, unknown>[] = (permRes.data as any).permutations ?? [];
+    const permutations: Record<string, unknown>[] = (permRes as any).permutations ?? [];
     logger.info({ jobId, count: permutations.length }, 'Permutations generated');
 
     emit(jobId, 'job:update', { status: 'processing', step: 'reasoning', progress: 70 });
 
-    const llmRes = await axios.post(
-      `${config.ai.llmReasoning}/reason`,
-      { permutations, context: contextData, vertical },
-      { timeout: 60_000, headers: config.aiInternalToken ? { Authorization: `Bearer ${config.aiInternalToken}` } : {} },
-    );
-    const reasonedDesigns: Record<string, unknown>[] = (llmRes.data as any).designs ?? [];
+    const llmRes = await aiClient.reason(vertical, contextData, permutations, correlationId);
+    const reasonedDesigns: Record<string, unknown>[] = (llmRes as any).designs ?? [];
     logger.info({ jobId, count: reasonedDesigns.length }, 'LLM reasoning complete');
 
     emit(jobId, 'job:update', { status: 'processing', step: 'compositing', progress: 85 });
 
-    const mockupRes = await axios.post(
-      `${config.ai.mockupCompositor}/compose`,
-      { designs: reasonedDesigns, image_keys: imageKeys },
-      { timeout: 90_000, headers: config.aiInternalToken ? { Authorization: `Bearer ${config.aiInternalToken}` } : {} },
-    );
-    const finalDesigns: Record<string, unknown>[] = (mockupRes.data as any).designs ?? [];
+    // Compose one mockup per design. The service contract is
+    // { layers:[{image_key,bbox}], output_key } — it takes S3 keys, not designs.
+    const finalDesigns: Record<string, unknown>[] = [];
+    for (const design of reasonedDesigns) {
+      const permId = ((design as any).id as string) ?? `perm_${crypto.randomBytes(6).toString('hex')}`;
+      const layers = (((design as any).items as any[]) ?? enrichedItems.slice(0, 2)).map((it: any) => ({
+        image_key: it.image_key ?? imageKeys[0],
+        bbox: it.bbox ?? { x: 90, y: 120, width: 530, height: 620 },
+      }));
+      const outputKey = `users/${userId}/jobs/${jobId}/mockups/${permId}.png`;
+      try {
+        const comp: any = await aiClient.compose(
+          { layers, output_key: outputKey, width: 1200, height: 900, format: 'png' },
+          correlationId,
+        );
+        finalDesigns.push({
+          ...design,
+          // output_key is the durable reference; signed_url expires (default 900s).
+          mockupKey: comp.output_key ?? outputKey,
+          mockupUrl: comp.signed_url ?? comp.object_url ?? comp.url,
+        });
+      } catch (err: any) {
+        logger.warn({ err: err.message, permId, jobId }, 'Mockup compose failed — returning design without mockup');
+        finalDesigns.push({ ...design });
+      }
+    }
     logger.info({ jobId, count: finalDesigns.length }, 'Mockup composition complete');
 
     const result = {
@@ -374,13 +381,10 @@ async function runSessionPipeline(job: Job<any>): Promise<void> {
         if (!config.isDev) {
           await setStep('embeddings', 'failed', 60, { warnings: ['Embedding upsert failed — vector search degraded'] });
         } else {
-          await setStep('embeddings', 'completed', 60);
-          // Fallback to legacy per-item upsert for dev
-          for (const v of vectors) {
-            axios.post(`${config.ai.embeddingEngine}/upsert`, {
-              item_id: v.id, user_id: userId, embedding: v.embedding, metadata: v.metadata
-            }, { timeout: 10_000 }).catch(()=>{});
-          }
+          // Dev: vector search is a nice-to-have, so continue. (The previous
+          // per-item retry here bypassed aiClient — no bearer token, no
+          // correlation ID, and a payload shape the service ignores.)
+          await setStep('embeddings', 'completed', 60, { warnings: ['Embedding upsert failed — vector search unavailable'] });
         }
       }
     } else {
@@ -438,7 +442,10 @@ async function runSessionPipeline(job: Job<any>): Promise<void> {
           contentType: 'image/png',
           width: (compRes as any).width ?? 1200,
           height: (compRes as any).height ?? 900,
-          url: (compRes as any).url, // short-lived, we also generate our own presigned on read
+          // signed_url is short-lived (ARTIFACT_URL_TTL_SECONDS, default 900s);
+          // objectKey above is the durable reference and we mint a fresh
+          // presigned URL per read request.
+          url: (compRes as any).signed_url ?? (compRes as any).object_url ?? (compRes as any).url,
         });
       } catch (err:any) {
         logger.warn({ err: err.message, permId, sessionId }, 'Mockup compose failed for permutation — skipping');

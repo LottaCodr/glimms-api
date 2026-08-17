@@ -47,6 +47,19 @@ describe('resolveAiUrls', () => {
     expect(new Set(values).size).toBe(AI_SERVICE_KEYS.length);
   });
 
+  it('accepts GLIMMS_BASE_URL as an alias for AI_GATEWAY_URL', () => {
+    const urls = resolveAiUrls({ GLIMMS_BASE_URL: 'https://glimms-ai.onrender.com/' });
+    expect(urls.objectDetection).toBe('https://glimms-ai.onrender.com/object-detection');
+  });
+
+  it('prefers AI_GATEWAY_URL when both names are set', () => {
+    const urls = resolveAiUrls({
+      AI_GATEWAY_URL: 'https://primary.example',
+      GLIMMS_BASE_URL: 'https://alias.example',
+    });
+    expect(urls.llmReasoning).toBe('https://primary.example/llm-reasoning');
+  });
+
   it('lets a per-service URL override the gateway', () => {
     const urls = resolveAiUrls({
       AI_GATEWAY_URL: 'https://glimms-ai.onrender.com',

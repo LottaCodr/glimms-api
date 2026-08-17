@@ -8,7 +8,7 @@
  *
  * 2. **Single gateway** (e.g. the Render deployment at https://glimms-ai.onrender.com) —
  *    all eight services behind one origin, addressed by path prefix:
- *      AI_GATEWAY_URL=https://glimms-ai.onrender.com
+ *      AI_GATEWAY_URL=https://glimms-ai.onrender.com   (alias: GLIMMS_BASE_URL)
  *    which resolves object-detection to https://glimms-ai.onrender.com/object-detection
  *
  * Precedence: an explicit per-service AI_*_URL always wins, then AI_GATEWAY_URL,
@@ -80,11 +80,17 @@ export function normalizeBaseUrl(url: string): string {
   return url.trim().replace(/\/+$/, '');
 }
 
+/** The gateway origin, from AI_GATEWAY_URL or its GLIMMS_BASE_URL alias. */
+export function resolveGatewayUrl(env: NodeJS.ProcessEnv = process.env): string {
+  const raw = env.AI_GATEWAY_URL?.trim() || env.GLIMMS_BASE_URL?.trim();
+  return raw ? normalizeBaseUrl(raw) : '';
+}
+
 export function resolveAiUrlsDetailed(
   env: NodeJS.ProcessEnv = process.env,
 ): Record<AiServiceKey, ResolvedAiUrl> {
-  const rawGateway = env.AI_GATEWAY_URL?.trim();
-  const gateway    = rawGateway ? normalizeBaseUrl(rawGateway) : '';
+  const rawGateway = resolveGatewayUrl(env);
+  const gateway    = rawGateway;
 
   const out = {} as Record<AiServiceKey, ResolvedAiUrl>;
   for (const key of AI_SERVICE_KEYS) {

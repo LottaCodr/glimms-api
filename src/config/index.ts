@@ -1,6 +1,6 @@
 import dotenv from 'dotenv';
 import { z } from 'zod';
-import { resolveAiUrls, resolveAiUrlsDetailed, normalizeBaseUrl } from './aiUrls';
+import { resolveAiUrls, resolveAiUrlsDetailed, resolveGatewayUrl } from './aiUrls';
 
 dotenv.config();
 
@@ -30,6 +30,7 @@ const schema = z.object({
   // AI services — either one gateway (AI_GATEWAY_URL, path-prefixed) or a URL
   // per service. Per-service values win; see ./aiUrls.ts for resolution rules.
   AI_GATEWAY_URL:              blankAsUndefined(z.string().url().optional()),
+  GLIMMS_BASE_URL:             blankAsUndefined(z.string().url().optional()),  // alias
   AI_OBJECT_DETECTION_URL:     z.string().optional(),
   AI_ATTRIBUTE_EXTRACTOR_URL:  z.string().optional(),
   AI_EMBEDDING_ENGINE_URL:     z.string().optional(),
@@ -44,6 +45,16 @@ const schema = z.object({
   // Treat 'degraded' AI services (model_loaded:false / in-memory vector store,
   // i.e. the lightweight fallback build) as ready in GET /health/ready.
   AI_ALLOW_DEGRADED:           blankAsUndefined(z.enum(['true','false']).default('false')),
+  // Upper bound on any single AI call. The gateway's slow paths (LLM reasoning,
+  // mockup composition) need ~120s; a cold instance adds 30-60s on top.
+  GLIMMS_TIMEOUT_MS:           blankAsUndefined(z.string().default('120000')),
+  // Max in-flight upstream requests per process. One container runs all eight
+  // services (gateway cap MAX_CONCURRENT_UPSTREAM=16), so stay well under it.
+  AI_MAX_CONCURRENCY:          blankAsUndefined(z.string().default('6')),
+  AI_MAX_RETRIES:              blankAsUndefined(z.string().default('2')),
+  // Consecutive failures before a service's circuit opens, and how long it stays open.
+  AI_BREAKER_THRESHOLD:        blankAsUndefined(z.string().default('5')),
+  AI_BREAKER_RESET_MS:         blankAsUndefined(z.string().default('30000')),
 
   STRIPE_SECRET_KEY:           z.string().optional(),
   STRIPE_WEBHOOK_SECRET:       z.string().optional(),
@@ -66,8 +77,11 @@ const schema = z.object({
 
   OPENWEATHER_API_KEY:    z.string().optional(),
 
-  // Internal service-to-service auth (added per backend implementation guide §4)
-  AI_INTERNAL_TOKEN:       z.string().optional(),
+  // Internal service-to-service auth (added per backend implementation guide §4).
+  // Must match AI_INTERNAL_TOKEN on the Glimms deployment; mandatory there when
+  // GLIMMS_ENV=production. GLIMMS_INTERNAL_TOKEN is an accepted alias.
+  AI_INTERNAL_TOKEN:       blankAsUndefined(z.string().optional()),
+  GLIMMS_INTERNAL_TOKEN:   blankAsUndefined(z.string().optional()),
 });
 
 const parsed = schema.safeParse(process.env);
@@ -83,6 +97,13 @@ const e = parsed.data;
 
 const aiUrls         = resolveAiUrls(process.env);
 const aiUrlsDetailed = resolveAiUrlsDetailed(process.env);
+
+const positiveNumber = (raw: string, fallback: number): number => {
+  const n = parseFloat(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
+const maxTimeoutMs = positiveNumber(e.GLIMMS_TIMEOUT_MS, 120_000);
 
 const timeoutMultiplier = (() => {
   const n = parseFloat(e.AI_TIMEOUT_MULTIPLIER);
@@ -124,11 +145,26 @@ export const config = {
   },
 
   /** Set when all services are reached through one path-prefixed origin. */
-  aiGatewayUrl: e.AI_GATEWAY_URL ? normalizeBaseUrl(e.AI_GATEWAY_URL) : undefined,
+  aiGatewayUrl: resolveGatewayUrl(process.env) || undefined,
   /** How each URL above was resolved — surfaced by GET /health/ready. */
   aiUrlSources: aiUrlsDetailed,
   /** Multiplier applied to every AI HTTP timeout (cold-start headroom). */
   aiTimeoutMultiplier: timeoutMultiplier,
+  /** Hard ceiling for any single AI call (GLIMMS_TIMEOUT_MS). */
+  aiMaxTimeoutMs: maxTimeoutMs,
+  /** Base timeouts per class of AI call, before multiplier and ceiling. */
+  aiTimeouts: {
+    health:   10_000,   // liveness/health probes
+    fast:     20_000,   // rule-based: quality, context, permutations, embeddings
+    standard: 45_000,   // image-backed: detection, attribute extraction
+    slow:     maxTimeoutMs, // LLM reasoning, mockup composition
+  },
+  /** Max in-flight upstream AI requests per process. */
+  aiMaxConcurrency: Math.max(1, Math.round(positiveNumber(e.AI_MAX_CONCURRENCY, 6))),
+  /** Retries after the first attempt (so 2 = up to 3 attempts total). */
+  aiMaxRetries: Math.max(0, Math.round(positiveNumber(e.AI_MAX_RETRIES, 2))),
+  aiBreakerThreshold: Math.max(1, Math.round(positiveNumber(e.AI_BREAKER_THRESHOLD, 5))),
+  aiBreakerResetMs:   positiveNumber(e.AI_BREAKER_RESET_MS, 30_000),
   /** Whether GET /health/ready passes when services run offline/fallback backends. */
   aiAllowDegraded: e.AI_ALLOW_DEGRADED === 'true',
 
@@ -158,5 +194,5 @@ export const config = {
   cors:      { allowedOrigins: e.ALLOWED_ORIGINS.split(',').map(o => o.trim()) },
   rateLimit: { windowMs: parseInt(e.RATE_LIMIT_WINDOW_MS), max: parseInt(e.RATE_LIMIT_MAX_REQUESTS) },
   openweather: { apiKey: e.OPENWEATHER_API_KEY },
-  aiInternalToken: e.AI_INTERNAL_TOKEN,
+  aiInternalToken: e.AI_INTERNAL_TOKEN ?? e.GLIMMS_INTERNAL_TOKEN,
 } as const;

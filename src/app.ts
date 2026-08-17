@@ -128,12 +128,31 @@ export function createApp(): Express {
   app.get('/health/ready', async (_req, res) => {
     const { aiClient } = await import('./lib/aiClient');
     const { summarizeReadiness } = await import('./lib/readiness');
+
+    // The gateway's own /health is authoritative about which services are
+    // running fallbacks, so prefer its production_ready + degradations.
+    let productionReady: boolean | null = null;
+    let degradations: Array<{ service: string; reason: string }> = [];
+    if (config.aiGatewayUrl) {
+      try {
+        const health = await aiClient.gatewayHealth();
+        productionReady = health.production_ready ?? null;
+        degradations    = health.degradations ?? [];
+      } catch {
+        productionReady = null; // reported per-service below
+      }
+    }
+
     const aiChecks = await aiClient.checkReadiness();
     const { status, ready } = summarizeReadiness(aiChecks, { allowDegraded: config.aiAllowDegraded });
+
     res.status(ready ? 200 : 503).json({
       status,
       ready,
       gateway: config.aiGatewayUrl ?? null,
+      // false = the AI tier is returning prototype output, not real model results
+      production_ready: productionReady,
+      degradations,
       checks:  aiChecks,
       ts:      new Date().toISOString(),
     });
